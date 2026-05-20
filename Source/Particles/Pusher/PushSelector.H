@@ -12,6 +12,7 @@
 #include "Particles/Pusher/UpdateMomentumBorisWithRadiationReaction.H"
 #include "Particles/Pusher/UpdateMomentumHigueraCary.H"
 #include "Particles/Pusher/UpdateMomentumVay.H"
+#include "Particles/Pusher/UpdateMomentumDriftKinetic.H"
 #include "Particles/WarpXParticleContainer.H"
 #include "Utils/WarpXAlgorithmSelection.H"
 
@@ -34,6 +35,8 @@
  * \param t_chi_max                 Cutoff chi for QSR
  * \param dt                        Time step size
  * \param momentum_push_type        Type of momentum push: FirstHalf, SecondHalf, Full, None
+ * \param dBdz                      Axial gradient dBz/dz of the magnetic field,
+ *                                  used only by the drift-kinetic pusher
  */
 
 template <int do_sync>
@@ -56,7 +59,8 @@ void doParticleMomentumPush(amrex::ParticleReal& ux,
                             const amrex::Real t_chi_max,
 #endif
                             const amrex::Real dt,
-                            MomentumPushType momentum_push_type)
+                            MomentumPushType momentum_push_type,
+                            const amrex::ParticleReal dBdz = amrex::ParticleReal(0))
 {
     amrex::ParticleReal qp = a_q;
     qp *= ion_lev;
@@ -98,6 +102,14 @@ void doParticleMomentumPush(amrex::ParticleReal& ux,
         UpdateMomentumHigueraCary( ux, uy, uz,
                                    Ex, Ey, Ez, Bx,
                                    By, Bz, qp, m, dt);
+    } else if (pusher_algo == ParticlePusherAlgo::DriftKinetic) {
+        // The drift-kinetic kick is a single parallel impulse rather than a
+        // rotation, so a half push is simply half the impulse: FirstHalf and
+        // SecondHalf together reproduce the Full kick exactly.
+        const amrex::Real dt_push =
+            (momentum_push_type == MomentumPushType::Full) ? dt : amrex::Real(0.5)*dt;
+        UpdateMomentumDriftKinetic( ux, uy, uz,
+                                    Ez, Bz, dBdz, qp, m, dt_push);
     } //else {
 //        amrex::Abort("Unknown particle pusher");
 //    }

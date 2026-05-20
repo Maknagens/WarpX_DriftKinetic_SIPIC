@@ -90,7 +90,8 @@ Diagnostics::BaseReadParameters ()
     if (utils::algorithms::is_in(m_varnames_fields, "phi") && (
             WarpX::electrostatic_solver_id != ElectrostaticSolverAlgo::LabFrame &&
             WarpX::electrostatic_solver_id != ElectrostaticSolverAlgo::LabFrameElectroMagnetostatic &&
-            WarpX::electrostatic_solver_id != ElectrostaticSolverAlgo::LabFrameEffectivePotential
+            WarpX::electrostatic_solver_id != ElectrostaticSolverAlgo::LabFrameEffectivePotential &&
+            WarpX::electrostatic_solver_id != ElectrostaticSolverAlgo::LabFrameDriftKinetic
         )
     ){
         ablastr::warn_manager::WMRecordWarning(

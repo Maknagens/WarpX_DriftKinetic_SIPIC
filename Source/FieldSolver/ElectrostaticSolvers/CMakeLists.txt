@@ -4,6 +4,7 @@ foreach(D IN LISTS WarpX_DIMS)
       PRIVATE
         EffectivePotentialES.cpp
         ElectrostaticSolver.cpp
+        LabFrameDriftKineticES.cpp
         LabFrameExplicitES.cpp
         PoissonBoundaryHandler.cpp
         RelativisticExplicitES.cpp

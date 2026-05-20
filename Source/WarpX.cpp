@@ -22,6 +22,7 @@
 #include "FieldSolver/ElectrostaticSolvers/LabFrameExplicitES.H"
 #include "FieldSolver/ElectrostaticSolvers/RelativisticExplicitES.H"
 #include "FieldSolver/ElectrostaticSolvers/EffectivePotentialES.H"
+#include "FieldSolver/ElectrostaticSolvers/LabFrameDriftKineticES.H"
 #include "FieldSolver/FiniteDifferenceSolver/FiniteDifferenceSolver.H"
 #include "FieldSolver/FiniteDifferenceSolver/MacroscopicProperties/MacroscopicProperties.H"
 #include "FieldSolver/FiniteDifferenceSolver/HybridPICModel/HybridPICModel.H"
@@ -415,6 +416,11 @@ WarpX::WarpX ()
     else if (electrostatic_solver_id == ElectrostaticSolverAlgo::LabFrameEffectivePotential)
     {
         m_electrostatic_solver = std::make_unique<EffectivePotentialES>(nlevs_max);
+    }
+    // Initialize the drift-kinetic (semi-implicit, flux-tube) electrostatic solver
+    else if (electrostatic_solver_id == ElectrostaticSolverAlgo::LabFrameDriftKinetic)
+    {
+        m_electrostatic_solver = std::make_unique<LabFrameDriftKineticES>(nlevs_max);
     }
     else
     {
@@ -2697,6 +2703,7 @@ WarpX::AllocLevelMFs (int lev, const BoxArray& ba, const DistributionMapping& dm
     if( (electrostatic_solver_id == ElectrostaticSolverAlgo::LabFrame) ||
         (electrostatic_solver_id == ElectrostaticSolverAlgo::LabFrameElectroMagnetostatic) ||
         (electrostatic_solver_id == ElectrostaticSolverAlgo::LabFrameEffectivePotential) ||
+        (electrostatic_solver_id == ElectrostaticSolverAlgo::LabFrameDriftKinetic) ||
         (electromagnetic_solver_id == ElectromagneticSolverAlgo::HybridPIC) ) {
         rho_ncomps = ncomps;
     }
@@ -2718,7 +2725,8 @@ WarpX::AllocLevelMFs (int lev, const BoxArray& ba, const DistributionMapping& dm
 
     if (electrostatic_solver_id == ElectrostaticSolverAlgo::LabFrame ||
         electrostatic_solver_id == ElectrostaticSolverAlgo::LabFrameElectroMagnetostatic ||
-        electrostatic_solver_id == ElectrostaticSolverAlgo::LabFrameEffectivePotential )
+        electrostatic_solver_id == ElectrostaticSolverAlgo::LabFrameEffectivePotential ||
+        electrostatic_solver_id == ElectrostaticSolverAlgo::LabFrameDriftKinetic )
     {
         const IntVect ngPhi = IntVect( AMREX_D_DECL(1,1,1) );
         m_fields.alloc_init(FieldType::phi_fp, lev, amrex::convert(ba, phi_nodal_flag), dm,
@@ -2872,6 +2880,16 @@ WarpX::AllocLevelMFs (int lev, const BoxArray& ba, const DistributionMapping& dm
         m_fields.alloc_init(FieldType::Bfield_fp_external, Direction{2}, lev,
             amrex::convert(ba, m_fields.get(FieldType::Bfield_fp,Direction{2},lev)->ixType()),
             dm, ncomps, ngEB, 0.0_rt);
+
+#if defined(WARPX_DIM_1D_Z)
+        // Axial gradient dBz/dz of the external magnetic field, used by the
+        // drift-kinetic pusher. It is a nodal scalar field, computed once from
+        // Bfield_fp_external in WarpX::LoadExternalFields. The drift-kinetic
+        // mirror model is a 1D (along-field-line) model, hence 1D only.
+        m_fields.alloc_init(FieldType::dBzdz_fp, lev,
+            amrex::convert(ba, amrex::IntVect::TheNodeVector()),
+            dm, ncomps, ngEB, 0.0_rt);
+#endif
     }
     if (mypc->m_B_ext_particle_s == "read_from_file") {
         //  These fields will be added to the fields that the particles see, and need to match the index type

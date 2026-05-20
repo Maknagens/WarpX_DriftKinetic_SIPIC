@@ -567,6 +567,10 @@ WarpX::PrintMainPICparameters ()
       amrex::Print() << "Operation mode:       | Electrostatic" << "\n";
       amrex::Print() << "                      | - laboratory frame, effective potential scheme" << "\n";
     }
+    else if (electrostatic_solver_id == ElectrostaticSolverAlgo::LabFrameDriftKinetic){
+      amrex::Print() << "Operation mode:       | Electrostatic" << "\n";
+      amrex::Print() << "                      | - laboratory frame, drift-kinetic" << "\n";
+    }
     else{
       amrex::Print() << "Operation mode:       | Electromagnetic" << "\n";
     }
@@ -1694,6 +1698,42 @@ WarpX::LoadExternalFields (int const lev)
         ReadExternalFieldFromFile(m_p_ext_field_params->external_fields_path, m_fields.get(FieldType::Bfield_fp_external,Direction{1},lev), "B", dimnames[1]);
         ReadExternalFieldFromFile(m_p_ext_field_params->external_fields_path, m_fields.get(FieldType::Bfield_fp_external,Direction{2},lev), "B", dimnames[2]);
     }
+
+#if defined(WARPX_DIM_1D_Z)
+    // Compute the axial gradient dBz/dz of the external magnetic field, used by
+    // the drift-kinetic pusher's magnetic-mirror force. The external Bz field is
+    // constant in time, so the gradient is evaluated once here (and again on
+    // restart) rather than re-gathered every step. This mirrors the way the
+    // electrostatic solver derives E from phi by a central difference.
+    if (m_fields.has(FieldType::dBzdz_fp, lev))
+    {
+        amrex::MultiFab & Bz_ext = *m_fields.get(FieldType::Bfield_fp_external, Direction{2}, lev);
+        amrex::MultiFab & dBzdz  = *m_fields.get(FieldType::dBzdz_fp, lev);
+
+        const amrex::Real inv_2dz = 1._rt / (2._rt * Geom(lev).CellSize(0));
+
+#ifdef AMREX_USE_OMP
+#pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
+#endif
+        for (amrex::MFIter mfi(dBzdz, amrex::TilingIfNotGPU()); mfi.isValid(); ++mfi)
+        {
+            // Fill the valid region and the guard cells, except the outermost
+            // layer where the central-difference stencil would reach outside
+            // the data available in Bfield_fp_external.
+            amrex::Box bx = mfi.growntilebox();
+            bx.grow(0, -1);
+
+            amrex::Array4<amrex::Real const> const Bz_arr  = Bz_ext.const_array(mfi);
+            amrex::Array4<amrex::Real>       const dBz_arr = dBzdz.array(mfi);
+
+            amrex::ParallelFor(bx,
+                [=] AMREX_GPU_DEVICE (int i, int j, int k)
+                {
+                    dBz_arr(i,j,k) = (Bz_arr(i+1,j,k) - Bz_arr(i-1,j,k)) * inv_2dz;
+                });
+        }
+    }
+#endif
 
     if (m_p_ext_field_params->E_ext_grid_type == ExternalFieldType::parse_ext_grid_function) {
         // Initialize Efield_fp_external with external function
