@@ -12,6 +12,7 @@
 #include "Particles/Pusher/UpdateMomentumBorisWithRadiationReaction.H"
 #include "Particles/Pusher/UpdateMomentumHigueraCary.H"
 #include "Particles/Pusher/UpdateMomentumVay.H"
+#include "Particles/Pusher/UpdateMomentumDriftKinetic.H"
 #include "Particles/WarpXParticleContainer.H"
 #include "Utils/WarpXAlgorithmSelection.H"
 
@@ -33,6 +34,8 @@
  * \param do_crr                    Whether to do the classical radiation reaction
  * \param t_chi_max                 Cutoff chi for QSR
  * \param dt                        Time step size
+ * \param dBdz                      Axial gradient dBz/dz of the magnetic field,
+ *                                  used only by the drift-kinetic pusher
  */
 
 template <int do_sync>
@@ -54,7 +57,8 @@ void doParticleMomentumPush(amrex::ParticleReal& ux,
 #ifdef WARPX_QED
                             const amrex::Real t_chi_max,
 #endif
-                            const amrex::Real dt)
+                            const amrex::Real dt,
+                            const amrex::ParticleReal dBdz = amrex::ParticleReal(0))
 {
     amrex::ParticleReal qp = a_q;
     qp *= ion_lev;
@@ -96,6 +100,9 @@ void doParticleMomentumPush(amrex::ParticleReal& ux,
         UpdateMomentumHigueraCary( ux, uy, uz,
                                    Ex, Ey, Ez, Bx,
                                    By, Bz, qp, m, dt);
+    } else if (pusher_algo == ParticlePusherAlgo::DriftKinetic) {
+        UpdateMomentumDriftKinetic( ux, uy, uz,
+                                    Ez, Bz, dBdz, qp, m, dt);
     } //else {
 //        amrex::Abort("Unknown particle pusher");
 //    }

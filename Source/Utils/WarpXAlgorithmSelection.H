@@ -63,6 +63,7 @@ AMREX_ENUM(ElectrostaticSolverAlgo,
            LabFrameElectroMagnetostatic,
            LabFrame,
            LabFrameEffectivePotential,
+           LabFrameDriftKinetic,
            Default = None);
 
 AMREX_ENUM(PoissonSolverAlgo,
@@ -75,6 +76,7 @@ AMREX_ENUM(ParticlePusherAlgo,
            Boris,
            Vay,
            HigueraCary,
+           DriftKinetic,
            higuera = HigueraCary,
            Default = Boris);
 

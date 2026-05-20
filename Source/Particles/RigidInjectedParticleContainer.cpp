@@ -15,6 +15,7 @@
 #include "Pusher/GetAndSetPosition.H"
 #include "Pusher/UpdateMomentumBoris.H"
 #include "Pusher/UpdateMomentumBorisWithRadiationReaction.H"
+#include "Pusher/UpdateMomentumDriftKinetic.H"
 #include "Pusher/UpdateMomentumHigueraCary.H"
 #include "Pusher/UpdateMomentumVay.H"
 #include "RigidInjectedParticleContainer.H"
@@ -440,6 +441,12 @@ RigidInjectedParticleContainer::PushP (int lev, Real dt,
                     UpdateMomentumHigueraCary( uxpp[ip], uypp[ip], uzpp[ip],
                                                Exp, Eyp, Ezp, Bxp,
                                                Byp, Bzp, qp, mass, dt);
+                } else if (pusher_algo == ParticlePusherAlgo::DriftKinetic) {
+                    // Momentum-only synchronization push: omit the magnetic-
+                    // mirror term (dBdz = 0), keeping the parallel electric push.
+                    UpdateMomentumDriftKinetic( uxpp[ip], uypp[ip], uzpp[ip],
+                                                Ezp, Bzp, amrex::ParticleReal(0),
+                                                qp, mass, dt);
                 } else {
                     amrex::Abort("Unknown particle pusher");
                 }

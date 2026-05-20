@@ -31,6 +31,7 @@ namespace warpx::fields
         Bfield_fp,  /**< The field that is updated by the field solver at each timestep */
         Efield_fp_external, /**< Stores grid particle fields provided by the user as  through an openPMD file */
         Bfield_fp_external, /**< Stores grid particle fields provided by the user as  through an openPMD file */
+        dBzdz_fp, /**< Axial gradient dBz/dz of the external magnetic field, used by the drift-kinetic pusher. Computed once from Bfield_fp_external. */
         current_fp, /**< The current that is used as a source for the field solver */
         current_fp_nodal, /**< Only used when using nodal current deposition */
         current_fp_vay,   /**< Only used when using Vay current deposition */

@@ -1,4 +1,5 @@
 CEXE_sources += PoissonBoundaryHandler.cpp
+CEXE_sources += LabFrameDriftKineticES.cpp
 CEXE_sources += LabFrameExplicitES.cpp
 CEXE_sources += RelativisticExplicitES.cpp
 CEXE_sources += EffectivePotentialES.cpp
