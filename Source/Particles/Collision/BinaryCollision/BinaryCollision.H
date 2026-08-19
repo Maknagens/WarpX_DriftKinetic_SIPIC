@@ -7,6 +7,7 @@
 #ifndef WARPX_PARTICLES_COLLISION_BINARYCOLLISION_H_
 #define WARPX_PARTICLES_COLLISION_BINARYCOLLISION_H_
 
+#include "FieldSolver/ElectrostaticSolvers/FluxTubeAreaScaling.H"
 #include "Particles/Algorithms/KineticEnergy.H"
 #include "Particles/Collision/BinaryCollision/Bremsstrahlung/BremsstrahlungFunc.H"
 #include "Particles/Collision/BinaryCollision/Coulomb/PairWiseCoulombCollisionFunc.H"
@@ -331,6 +332,30 @@ public:
         amrex::Real const rmin = xyzmin.x;
         auto const dr = geom_lev.CellSize(0);
 #endif
+#if defined(WARPX_DIM_1D_Z)
+        // Drift-kinetic flux tube: the physical volume of a cell is A(z) dz
+        // rather than dz, with A(z) = B_ref/B(z). Without this the collision
+        // rates read a density that is wrong by A -- most strongly at the
+        // mirror throat, where the plasma is in fact compressed.
+        const bool flux_tube = warpx::drift_kinetic::FluxTubeScalingEnabled();
+        amrex::Array4<const amrex::Real> bz_ft_arr;
+        int iz_lo_ft = 0;
+        amrex::Real Bref_ft = 1._rt;
+        if (flux_tube) {
+            WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+                WarpX::GetInstance().m_fields.has(
+                    warpx::fields::FieldType::Bfield_fp_external, ablastr::fields::Direction{2}, lev),
+                "Collisions in a drift-kinetic run require an external grid B field "
+                "to define the flux-tube volume A(z) dz.");
+            const amrex::MultiFab & Bz_ft = *WarpX::GetInstance().m_fields.get(
+                warpx::fields::FieldType::Bfield_fp_external, ablastr::fields::Direction{2}, lev);
+            bz_ft_arr = Bz_ft.const_array(mfi);
+            // findParticlesInEachCell bins relative to the cell-centered
+            // tilebox, so i_cell = iz - iz_lo_ft.
+            iz_lo_ft = mfi.tilebox(amrex::IntVect::TheZeroVector()).smallEnd(0);
+            Bref_ft = warpx::drift_kinetic::ReferenceB();
+        }
+#endif
 
         auto volume_factor = [=] AMREX_GPU_DEVICE(int i_cell) noexcept {
 #if defined(WARPX_DIM_RZ)
@@ -351,6 +376,13 @@ public:
             // rr is radius at the cell center
             amrex::ParticleReal const rr = rmin + (ri + 0.5_prt)*dr;
             return 4.0_prt*static_cast<amrex::ParticleReal>(MathConst::pi)*rr*rr;
+#elif defined(WARPX_DIM_1D_Z)
+            // Flux-tube cross-section A(z) at the cell center. The external Bz
+            // is nodal, so the cell-centered value averages the two nodes.
+            if (!flux_tube) { return 1.0_prt; }
+            int const iz = iz_lo_ft + i_cell;
+            amrex::Real const Bc = 0.5_rt*(bz_ft_arr(iz,0,0) + bz_ft_arr(iz+1,0,0));
+            return (Bc > 0._rt) ? static_cast<amrex::ParticleReal>(Bref_ft/Bc) : 1.0_prt;
 #else
             // No factor is needed for Cartesian
             amrex::ignore_unused(i_cell);

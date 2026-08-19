@@ -11,6 +11,7 @@
  */
 #include "MultiParticleContainer.H"
 
+#include "FieldSolver/ElectrostaticSolvers/FluxTubeAreaScaling.H"
 #include "Fields.H"
 #include "Particles/ElementaryProcess/Ionization.H"
 #ifdef WARPX_QED
@@ -646,6 +647,16 @@ MultiParticleContainer::DepositCharge (
     for (int lev = 0; lev < rho.size(); ++lev)
     {
         WarpX::GetInstance().ApplyInverseVolumeScalingToChargeDensity(rho[lev], lev);
+    }
+#endif
+
+#if defined(WARPX_DIM_1D_Z)
+    // Drift-kinetic flux tube: the per-species deposits above are charge per
+    // unit length along the field line; rescale to a 3D charge density. The
+    // electrostatic solver multiplies the area back in for the Poisson source.
+    for (int lev = 0; lev < rho.size(); ++lev)
+    {
+        warpx::drift_kinetic::ScaleChargeDensityToFluxTubeVolume(rho[lev], lev);
     }
 #endif
 }

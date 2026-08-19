@@ -17,6 +17,7 @@
 #include "Deposition/MassMatricesDeposition.H"
 #include "Deposition/SharedDepositionUtils.H"
 #include "EmbeddedBoundary/Enabled.H"
+#include "FieldSolver/ElectrostaticSolvers/FluxTubeAreaScaling.H"
 #include "Fields.H"
 #include "Pusher/GetAndSetPosition.H"
 #include "Pusher/UpdatePosition.H"
@@ -1878,6 +1879,17 @@ WarpXParticleContainer::DepositCharge (amrex::MultiFab* rho,
     }
 #endif
 
+#if defined(WARPX_DIM_1D_Z)
+    if (apply_boundary_and_scale_volume)
+    {
+        // Drift-kinetic flux tube: turn the deposited charge per unit length
+        // into a 3D charge density, so every consumer of this MultiFab (the
+        // semi-implicit sigma, the Debye length, density diagnostics) reads
+        // n_3D. Done before the guard-cell sum, as in the radial case above.
+        warpx::drift_kinetic::ScaleChargeDensityToFluxTubeVolume(rho, lev);
+    }
+#endif
+
     // Exchange guard cells
     if ( !local ) {
         // Possible performance optimization:
@@ -2128,6 +2140,12 @@ WarpXParticleContainer::GetDebyeLength (int lev)
 
     auto const dV = AMREX_D_TERM(Geom(lev).CellSize(0), *Geom(lev).CellSize(1), *Geom(lev).CellSize(2));
 
+#if defined(WARPX_DIM_1D_Z)
+    const bool flux_tube_dl = warpx::drift_kinetic::FluxTubeScalingEnabled() &&
+        warpx.m_fields.has(warpx::fields::FieldType::Bfield_fp_external,
+                           ablastr::fields::Direction{2}, lev);
+#endif
+
 #ifdef AMREX_USE_OMP
 #pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
 #endif
@@ -2140,6 +2158,17 @@ WarpXParticleContainer::GetDebyeLength (int lev)
         amrex::XDim3 const xyzmin = WarpX::LowerCorner(box, lev, 0._rt);
         amrex::Real const rmin = xyzmin.x;
         amrex::Real const dr = Geom(lev).CellSize(0);
+#endif
+
+#if defined(WARPX_DIM_1D_Z)
+        // Drift-kinetic flux tube: the cell volume is A(z) dz, not dz.
+        amrex::Array4<const amrex::Real> bz_ft_arr;
+        amrex::Real Bref_ft = 1._rt;
+        if (flux_tube_dl) {
+            bz_ft_arr = (*warpx.m_fields.get(warpx::fields::FieldType::Bfield_fp_external,
+                                             ablastr::fields::Direction{2}, lev)).const_array(mfi);
+            Bref_ft = warpx::drift_kinetic::ReferenceB();
+        }
 #endif
 
         amrex::Array4<amrex::Real> const& num_array = particle_number.array(mfi);
@@ -2166,6 +2195,15 @@ WarpXParticleContainer::GetDebyeLength (int lev)
                 // highest order term
                 amrex::Real const r_cell = r + 0.5_rt*dr;
                 amrex::Real const volume_factor = 4.0_rt*MathConst::pi*r_cell*r_cell;
+#elif defined(WARPX_DIM_1D_Z)
+                // Flux-tube cross-section A(z) = B_ref/B(z) at the cell center;
+                // the external Bz is nodal, so average the two bounding nodes.
+                amrex::Real volume_factor = 1._rt;
+                if (flux_tube_dl) {
+                    // ParallelFor runs over `box`, so `i` is the absolute cell index.
+                    amrex::Real const Bc = 0.5_rt*(bz_ft_arr(i,0,0) + bz_ft_arr(i+1,0,0));
+                    if (Bc > 0._rt) { volume_factor = Bref_ft/Bc; }
+                }
 #else
                 // No factor is needed for Cartesian
                 amrex::Real constexpr volume_factor = 1._rt;

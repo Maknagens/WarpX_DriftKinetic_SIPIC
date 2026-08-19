@@ -9,6 +9,7 @@
 #include "Fluids/MultiFluidContainer_fwd.H"
 #include "EmbeddedBoundary/Enabled.H"
 #include "Fields.H"
+#include "FluxTubeAreaScaling.H"
 #include "Particles/MultiParticleContainer.H"
 #include "Particles/ParticleBoundaryBuffer.H"
 #include "Utils/Parser/ParserUtils.H"
@@ -208,7 +209,7 @@ void LabFrameDriftKineticES::RestoreWallCharge ()
 void LabFrameDriftKineticES::ComputeSpaceChargeField (
     ablastr::fields::MultiFabRegister& fields,
     MultiParticleContainer& mpc,
-    [[maybe_unused]] MultiFluidContainer* mfl,
+    MultiFluidContainer* mfl,
     int max_level)
 {
     WARPX_PROFILE("LabFrameDriftKineticES::ComputeSpaceChargeField");
@@ -224,11 +225,15 @@ void LabFrameDriftKineticES::ComputeSpaceChargeField (
     const MultiLevelScalarField phi_fp = fields.get_mr_levels(FieldType::phi_fp, max_level);
     const MultiLevelVectorField Efield_fp = fields.get_mr_levels_alldirs(FieldType::Efield_fp, max_level);
 
+    // DepositCharge divides out the flux-tube area, so rho_fp holds the 3D
+    // charge density n_3D from here on (see FluxTubeAreaScaling.H). The fluid
+    // deposition below has no such rescaling, so the two cannot be mixed.
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        mfl == nullptr,
+        "LabFrameDriftKineticES does not support fluid species: the fluid charge "
+        "deposition is not rescaled by the flux-tube area A(z).");
+
     mpc.DepositCharge(rho_fp, 0.0_rt);
-    if (mfl) {
-        const int lev = 0;
-        mfl->DepositCharge(fields, *rho_fp[lev], lev);
-    }
 
     // Apply filter, perform MPI exchange, interpolate across levels
     const Vector<std::unique_ptr<MultiFab> > rho_buf(num_levels);
@@ -240,6 +245,17 @@ void LabFrameDriftKineticES::ComputeSpaceChargeField (
         warpx.ApplyRhofieldBoundary(lev, rho_fp[lev], PatchType::fine);
     }
 #endif
+
+    // Build the flux-tube Poisson source term. The physical equation is
+    //     d_z( A eps0 d_z phi ) = -A rho_3D,
+    // so the right-hand side carries the area that the deposition divided out.
+    // Everything above this line -- filtering, the guard-cell sum, the boundary
+    // reflection -- therefore acts on the physical density n_3D; only the MLMG
+    // source is extensive. ComputeSigma supplies the matching A on the
+    // left-hand side.
+    for (int lev = 0; lev < num_levels; lev++) {
+        warpx::drift_kinetic::ScaleChargeDensityByFluxTubeArea(rho_fp[lev], lev);
+    }
 
     // Floating right (z_hi) wall: accumulate the charge collected there and
     // inject it as a charge sheet into rho at the boundary node. With a
@@ -318,6 +334,9 @@ void LabFrameDriftKineticES::ComputeSigma ( MultiFab& sigma ) const
         );
 
         for (auto const& pc : mypc) {
+            // GetChargeDensity divides out the flux-tube area, so this is the
+            // 3D density n_3D and the dressing below is the true w_p of the
+            // species -- not the value reduced by A(z) at the mirror throat.
             auto rho = pc->GetChargeDensity(lev, true);
             warpx.ApplyFilterandSumBoundaryRho(lev, lev, *rho, 0, rho->nComp());
 
