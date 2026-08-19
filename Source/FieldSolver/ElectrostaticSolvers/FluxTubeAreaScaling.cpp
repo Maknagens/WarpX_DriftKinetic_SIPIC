@@ -73,14 +73,31 @@ namespace
         const amrex::Real Bref = ReferenceB();
         const int ncomp = rho->nComp();
 
-        // Guard cells are scaled too (see below), so the area must be defined
-        // everywhere charge was deposited. Checked once, outside the loop.
-        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
-            Bz.nGrowVect().allGE(rho->nGrowVect()),
-            "The external Bz field has fewer guard cells than the charge density, "
-            "so the flux-tube area is undefined where charge was deposited. Lower "
-            "the deposition shape order (algo.particle_shape) or allocate more "
-            "field guard cells.");
+        // A(z) is only defined where the external Bz holds data, so scale the
+        // valid region plus however many guard layers the two fields share.
+        amrex::IntVect ng_scale = rho->nGrowVect();
+        ng_scale.min(Bz.nGrowVect());
+
+        if (!multiply)
+        {
+            // Dividing runs before the guard-cell sum, so every layer that can
+            // carry a deposit has to be covered. Deposits reach at most
+            // ng_depos_rho layers; rho is identically zero beyond that. The
+            // *allocated* width is not the requirement -- with filtering on it
+            // is deliberately wider than the deposit reach (GuardCellManager
+            // adds the filter stencil to ng_alloc_Rho after fixing
+            // ng_depos_rho), and Bz is not expected to match that.
+            amrex::IntVect ng_required = warpx.get_ng_depos_rho();
+            ng_required.min(rho->nGrowVect());
+            WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+                ng_scale.allGE(ng_required),
+                "The external Bz field has fewer guard cells than the charge "
+                "deposition reaches, so the flux-tube area is undefined where "
+                "charge was deposited. Lower the deposition shape order "
+                "(algo.particle_shape) or allocate more field guard cells.");
+        }
+        // Multiplying builds the MLMG source term, which is read on the valid
+        // region only, so a short guard region is harmless there.
 
         // The deposition kernels divide by the Cartesian cell volume (dz in 1D),
         // so they produce rho_1D = A rho_3D with A(z) = B_ref/B(z). Dividing by
@@ -94,7 +111,7 @@ namespace
             // Guard cells are scaled too: this runs before the guard-cell sum,
             // and A is a function of position, so a guard cell and the valid
             // cell it folds into see the same A.
-            const amrex::Box gbx = mfi.growntilebox(rho->nGrowVect());
+            const amrex::Box gbx = mfi.growntilebox(ng_scale);
 
             amrex::Array4<amrex::Real> const & rho_arr = rho->array(mfi);
             amrex::Array4<const amrex::Real> const & Bz_arr = Bz.const_array(mfi);
