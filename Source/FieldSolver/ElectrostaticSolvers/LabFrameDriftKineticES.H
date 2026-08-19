@@ -64,6 +64,22 @@ public:
         MultiFluidContainer* mfl,
         int max_level) override;
 
+    /** \brief Advance the temporally filtered dressing eps_SI and, from the
+     *         same per-species deposits, accumulate the total charge density
+     *         into `rho_fp`.
+     *
+     * Depositing once for both is what upstream EffectivePotentialES does as
+     * of 26.08. Besides halving the deposition cost it makes the two
+     * quantities consistent by construction: they see identical filtering,
+     * guard-cell summation and boundary handling, which is not the case when
+     * rho_fp is built by a separate MultiParticleContainer::DepositCharge +
+     * SyncRho pass.
+     *
+     * \param[out] rho_fp total charge density (reset here), as n_3D
+     */
+    void UpdateDressingAndRho (
+        ablastr::fields::MultiLevelScalarField const& rho_fp ) const;
+
     /** \brief Build sigma = A(z) * eps_SI (flux-tube area times the
      *         semi-implicit effective-potential dressing). */
     void ComputeSigma ( amrex::MultiFab& sigma ) const;

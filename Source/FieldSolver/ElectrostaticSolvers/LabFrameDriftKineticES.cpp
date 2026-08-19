@@ -248,7 +248,7 @@ void LabFrameDriftKineticES::RestoreWallCharge ()
 
 void LabFrameDriftKineticES::ComputeSpaceChargeField (
     ablastr::fields::MultiFabRegister& fields,
-    MultiParticleContainer& mpc,
+    [[maybe_unused]] MultiParticleContainer& mpc,
     MultiFluidContainer* mfl,
     int max_level)
 {
@@ -258,33 +258,27 @@ void LabFrameDriftKineticES::ComputeSpaceChargeField (
     using ablastr::fields::MultiLevelVectorField;
     using warpx::fields::FieldType;
 
-    bool const skip_lev0_coarse_patch = true;
-
     const MultiLevelScalarField rho_fp = fields.get_mr_levels(FieldType::rho_fp, max_level);
-    const MultiLevelScalarField rho_cp = fields.get_mr_levels(FieldType::rho_cp, max_level, skip_lev0_coarse_patch);
     const MultiLevelScalarField phi_fp = fields.get_mr_levels(FieldType::phi_fp, max_level);
     const MultiLevelVectorField Efield_fp = fields.get_mr_levels_alldirs(FieldType::Efield_fp, max_level);
 
-    // DepositCharge divides out the flux-tube area, so rho_fp holds the 3D
-    // charge density n_3D from here on (see FluxTubeAreaScaling.H). The fluid
-    // deposition below has no such rescaling, so the two cannot be mixed.
+    // GetChargeDensity divides out the flux-tube area, so rho_fp holds the 3D
+    // charge density n_3D from here on (see FluxTubeAreaScaling.H). A fluid
+    // deposition would have no such rescaling, so the two cannot be mixed.
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
         mfl == nullptr,
         "LabFrameDriftKineticES does not support fluid species: the fluid charge "
         "deposition is not rescaled by the flux-tube area A(z).");
 
-    mpc.DepositCharge(rho_fp, 0.0_rt);
-
-    // Apply filter, perform MPI exchange, interpolate across levels
-    const Vector<std::unique_ptr<MultiFab> > rho_buf(num_levels);
     auto & warpx = WarpX::GetInstance();
-    warpx.SyncRho( rho_fp, rho_cp, amrex::GetVecOfPtrs(rho_buf) );
 
-#ifndef WARPX_DIM_RZ
-    for (int lev = 0; lev < num_levels; lev++) {
-        warpx.ApplyRhofieldBoundary(lev, rho_fp[lev], PatchType::fine);
-    }
-#endif
+    // One deposition pass builds both the semi-implicit dressing and rho_fp.
+    // The per-species densities carry their own filtering, guard-cell sum and
+    // boundary handling (inside GetChargeDensity and ApplyFilterandSumBoundaryRho),
+    // so no separate SyncRho / ApplyRhofieldBoundary pass is needed here -- and
+    // rho_fp is then guaranteed to be the sum of exactly the densities the
+    // dressing saw.
+    UpdateDressingAndRho(rho_fp);
 
     // Build the flux-tube Poisson source term. The physical equation is
     //     d_z( A eps0 d_z phi ) = -A rho_3D,
@@ -344,15 +338,18 @@ void LabFrameDriftKineticES::ComputeSpaceChargeField (
     }
 }
 
-void LabFrameDriftKineticES::ComputeSigma ( MultiFab& sigma ) const
+void LabFrameDriftKineticES::UpdateDressingAndRho (
+    ablastr::fields::MultiLevelScalarField const& rho_fp ) const
 {
-    using ablastr::fields::Direction;
     using warpx::fields::FieldType;
 
     const int lev = 0;
     const Real C_SI = m_effective_potential_factor;
 
     auto & warpx = WarpX::GetInstance();
+
+    // rho_fp is rebuilt from scratch below.
+    for (const auto& rho_lev : rho_fp) { rho_lev->setVal(0.0_rt); }
 
     // Effective-potential semi-implicit dressing eps_SI (Barnes 2021):
     // eps_SI = 1 + sum_species C_SI * (w_p * dt)^2 / 4, temporally filtered as
@@ -370,9 +367,8 @@ void LabFrameDriftKineticES::ComputeSigma ( MultiFab& sigma ) const
     }
     eps_SI.mult(1._rt - time_filter_param, 0);
 
-    if (C_SI > 0._rt)
     {
-        // sigma is a cell-centered array
+        // eps_SI is a cell-centered array
         amrex::GpuArray<int, 3> const cell_centered = {0, 0, 0};
         amrex::GpuArray<int, 3> const coarsen = {1, 1, 1};
 #if defined(WARPX_DIM_3D)
@@ -398,6 +394,14 @@ void LabFrameDriftKineticES::ComputeSigma ( MultiFab& sigma ) const
             // species -- not the value reduced by A(z) at the mirror throat.
             auto rho = pc->GetChargeDensity(lev, true);
             warpx.ApplyFilterandSumBoundaryRho(lev, lev, *rho, 0, rho->nComp());
+
+            // Accumulate the total (signed) charge density from the very same
+            // deposit that dresses the operator. Only the guard region present
+            // in both MultiFabs is added: the deposition MultiFab may still
+            // carry the pre-filter guard width.
+            auto add_ng = rho_fp[lev]->nGrowVect();
+            add_ng.min(rho->nGrowVect());
+            amrex::MultiFab::Add(*rho_fp[lev], *rho, 0, 0, 1, add_ng);
 
             auto const q = std::abs(pc->getCharge());
             auto const mult_factor_pc = mult_factor * q / pc->getMass();
@@ -430,9 +434,21 @@ void LabFrameDriftKineticES::ComputeSigma ( MultiFab& sigma ) const
     // eps^n = 1 + [(1 - a) D^{n-1} + a D^n], i.e. only the dressing D is
     // filtered while the 1 is reproduced exactly.
     eps_SI.plus(time_filter_param, 0);
+}
 
-    // sigma = A(z) * eps_SI. Guard cells are left at 1 (as before): the A
-    // scaling below covers the valid region only, which is what MLMG reads.
+void LabFrameDriftKineticES::ComputeSigma ( MultiFab& sigma ) const
+{
+    using ablastr::fields::Direction;
+    using warpx::fields::FieldType;
+
+    const int lev = 0;
+    auto & warpx = WarpX::GetInstance();
+
+    const MultiFab & eps_SI =
+        *warpx.m_fields.get(FieldType::effective_potential_sigma, lev);
+
+    // sigma = A(z) * eps_SI. Guard cells are left at 1: the A scaling below
+    // covers the valid region only, which is what MLMG reads.
     sigma.setVal(1.0_rt);
     MultiFab::Copy(sigma, eps_SI, 0, 0, 1, 0);
 
