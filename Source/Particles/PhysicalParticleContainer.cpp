@@ -1510,6 +1510,7 @@ PhysicalParticleContainer::PushPX (WarpXParIter& pti,
     // under a *different* magnetic field. The magnetic moment mu is recomputed
     // from (ux,uy) inside the pusher each step. This mirror model is 1D.
 #if defined(WARPX_DIM_1D_Z)
+    using warpx::fields::FieldType;
     const bool drift_kinetic = (pusher_algo == ParticlePusherAlgo::DriftKinetic);
     auto& warpx_fields = WarpX::GetInstance().m_fields;
     const bool gather_dbdz = drift_kinetic && (lev == gather_lev) &&
