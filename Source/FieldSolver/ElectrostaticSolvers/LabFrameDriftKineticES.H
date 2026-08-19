@@ -111,6 +111,22 @@ private:
     /** Semi-implicit (effective-potential) factor C_SI; 0 => fully explicit. */
     amrex::Real m_effective_potential_factor = 0.0;
 
+    /** Temporal filter weight for the semi-implicit dressing: the stored
+     *  eps_SI relaxes as eps^n = (1-a) eps^{n-1} + a eps_instantaneous, so
+     *  a = 1 recovers the instantaneous value and a = 0.1 (the upstream
+     *  default) gives a ~10-step time constant. */
+    amrex::Real m_time_filter_param = 0.1;
+
+    /** Floor on the density [m^-3] used in the dressing, so that near-vacuum
+     *  cells do not fall back to an undressed (explicit) sigma. */
+    amrex::Real m_density_floor = 0.0;
+
+    /** Seeds the temporal filter: the first ComputeSigma after InitData uses
+     *  a = 1, since there is no history yet. Mutable because ComputeSigma is
+     *  const. Set in InitData, so a restart re-seeds rather than carrying a
+     *  checkpointed history. */
+    mutable bool m_overwrite_sigma = true;
+
     /** Accumulated surface charge collected at the floating z_hi wall. */
     amrex::Real m_sigma_wall = 0.0;
 

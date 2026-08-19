@@ -18,7 +18,9 @@
 
 #include <AMReX_ParallelDescriptor.H>
 
+#include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <fstream>
 #include <iomanip>
 #include <string>
@@ -33,6 +35,19 @@ void LabFrameDriftKineticES::ReadDriftKineticParameters ()
     utils::parser::queryWithParser(pp_warpx, "drift_kinetic_reference_B", m_reference_B);
     // Semi-implicit effective-potential factor; 0 recovers the explicit solve.
     utils::parser::queryWithParser(pp_warpx, "effective_potential_factor", m_effective_potential_factor);
+    // Temporal filtering of the dressing (1 = instantaneous) and the density
+    // floor below which the dressing is clamped. Same input names and defaults
+    // as the upstream EffectivePotentialES solver.
+    utils::parser::queryWithParser(pp_warpx, "effective_potential_time_filter_param", m_time_filter_param);
+    utils::parser::queryWithParser(pp_warpx, "effective_potential_density_floor", m_density_floor);
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_time_filter_param > 0._rt && m_time_filter_param <= 1._rt,
+        "warpx.effective_potential_time_filter_param must be in (0, 1]: it is the "
+        "weight of the new value in eps^n = (1-a) eps^{n-1} + a eps_new, so a = 1 "
+        "means no filtering and a -> 0 freezes the dressing at its initial value.");
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_density_floor >= 0._rt,
+        "warpx.effective_potential_density_floor must be non-negative.");
     // Optional override of the floating-wall charge state-log filename.
     pp_warpx.query("drift_kinetic_wall_charge_log", m_wall_charge_log);
 }
@@ -47,7 +62,32 @@ void LabFrameDriftKineticES::InitData ()
     // actually reached the solver.
     amrex::Print() << "LabFrameDriftKineticES: effective_potential_factor (C_SI) = "
                    << m_effective_potential_factor
-                   << ", reference_B = " << m_reference_B << "\n";
+                   << ", reference_B = " << m_reference_B
+                   << ", time_filter_param = " << m_time_filter_param
+                   << ", density_floor = " << m_density_floor << "\n";
+
+    // Persistent store for the semi-implicit dressing eps_SI, i.e. sigma
+    // without the flux-tube area. It lives in the MultiFab registry rather
+    // than in a member so that it is remade when load balancing changes the
+    // distribution mapping. A(z) is deliberately kept out of it: A is static
+    // in time, so filtering it would be meaningless, and storing it would
+    // reintroduce exactly the staleness the registry avoids.
+    {
+        auto & mf_registry = warpx.GetMultiFabRegister();
+        if (!mf_registry.has(warpx::fields::FieldType::effective_potential_sigma, 0))
+        {
+            const amrex::MultiFab * rho_ptr =
+                mf_registry.get(warpx::fields::FieldType::rho_fp, 0);
+            mf_registry.alloc_init(
+                warpx::fields::FieldType::effective_potential_sigma, /*level=*/ 0,
+                amrex::convert(rho_ptr->boxArray(), amrex::IntVect(AMREX_D_DECL(0,0,0))),
+                rho_ptr->DistributionMap(), 1, amrex::IntVect(AMREX_D_DECL(0,0,0)), 1.0_rt
+            );
+        }
+    }
+    // There is no history on the first step, nor after a restart (InitData
+    // runs in both cases), so seed the filter from the instantaneous value.
+    m_overwrite_sigma = true;
 
 #if defined(WARPX_ZINDEX)
     // The z_hi wall follows the z_hi field boundary condition:
@@ -306,12 +346,29 @@ void LabFrameDriftKineticES::ComputeSpaceChargeField (
 
 void LabFrameDriftKineticES::ComputeSigma ( MultiFab& sigma ) const
 {
-    // Effective-potential semi-implicit dressing eps_SI (Barnes 2021):
-    // eps_SI = 1 + sum_species C_SI * (w_p * dt)^2 / 4.
-    sigma.setVal(1.0_rt);
+    using ablastr::fields::Direction;
+    using warpx::fields::FieldType;
 
     const int lev = 0;
     const Real C_SI = m_effective_potential_factor;
+
+    auto & warpx = WarpX::GetInstance();
+
+    // Effective-potential semi-implicit dressing eps_SI (Barnes 2021):
+    // eps_SI = 1 + sum_species C_SI * (w_p * dt)^2 / 4, temporally filtered as
+    //     eps^n = (1 - a) eps^{n-1} + a eps_instantaneous.
+    // The decay is applied to the stored value here and the vacuum term is
+    // added back as `a` after the species loop, so that the filter acts on the
+    // dressing alone and the 1 stays exact.
+    MultiFab & eps_SI = *warpx.m_fields.get(FieldType::effective_potential_sigma, lev);
+
+    Real time_filter_param = m_time_filter_param;
+    if (m_overwrite_sigma) {
+        // No history yet: take the instantaneous value.
+        time_filter_param = 1._rt;
+        m_overwrite_sigma = false;
+    }
+    eps_SI.mult(1._rt - time_filter_param, 0);
 
     if (C_SI > 0._rt)
     {
@@ -326,48 +383,64 @@ void LabFrameDriftKineticES::ComputeSigma ( MultiFab& sigma ) const
         amrex::GpuArray<int, 3> const nodal = {1, 0, 0};
 #endif
 
-        auto& warpx = WarpX::GetInstance();
         auto& mypc = warpx.GetPartContainer();
 
         const auto mult_factor = (
             C_SI * warpx.getdt(lev) * warpx.getdt(lev) / (4._rt * PhysConst::epsilon_0)
         );
+        const Real density_floor = m_density_floor;
 
         for (auto const& pc : mypc) {
+            if (pc->do_not_deposit) { continue; }
+
             // GetChargeDensity divides out the flux-tube area, so this is the
             // 3D density n_3D and the dressing below is the true w_p of the
             // species -- not the value reduced by A(z) at the mirror throat.
             auto rho = pc->GetChargeDensity(lev, true);
             warpx.ApplyFilterandSumBoundaryRho(lev, lev, *rho, 0, rho->nComp());
 
-            auto const mult_factor_pc = mult_factor * pc->getCharge() / pc->getMass();
+            auto const q = std::abs(pc->getCharge());
+            auto const mult_factor_pc = mult_factor * q / pc->getMass();
+            // Charge density corresponding to the density floor, so that
+            // near-vacuum cells keep a dressing rather than falling back to an
+            // undressed (explicit-stability-limited) sigma.
+            const Real rho_floor = static_cast<Real>(density_floor * q);
 
 #ifdef AMREX_USE_OMP
 #pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
 #endif
-            for ( MFIter mfi(sigma, TilingIfNotGPU()); mfi.isValid(); ++mfi ) {
-                Array4<Real> const& sigma_arr = sigma.array(mfi);
+            for ( MFIter mfi(eps_SI, TilingIfNotGPU()); mfi.isValid(); ++mfi ) {
+                Array4<Real> const& eps_arr = eps_SI.array(mfi);
                 Array4<Real const> const& rho_arr = rho->const_array(mfi);
 
                 amrex::ParallelFor(mfi.tilebox(), [=] AMREX_GPU_DEVICE (int i, int j, int k){
-                    auto const rho_cc = ablastr::coarsen::sample::Interp(
-                        rho_arr, nodal, cell_centered, coarsen, i, j, k, 0
+                    auto const rho_cc = std::max(
+                        rho_floor,
+                        std::abs(ablastr::coarsen::sample::Interp(
+                            rho_arr, nodal, cell_centered, coarsen, i, j, k, 0
+                        ))
                     );
-                    sigma_arr(i, j, k, 0) += mult_factor_pc * rho_cc;
+                    eps_arr(i, j, k, 0) += time_filter_param * mult_factor_pc * rho_cc;
                 });
             }
         }
     }
+
+    // Restore the vacuum term. Combined with the decay above this gives
+    // eps^n = 1 + [(1 - a) D^{n-1} + a D^n], i.e. only the dressing D is
+    // filtered while the 1 is reproduced exactly.
+    eps_SI.plus(time_filter_param, 0);
+
+    // sigma = A(z) * eps_SI. Guard cells are left at 1 (as before): the A
+    // scaling below covers the valid region only, which is what MLMG reads.
+    sigma.setVal(1.0_rt);
+    MultiFab::Copy(sigma, eps_SI, 0, 0, 1, 0);
 
     // Fold in the magnetic flux-tube area A(z) = B_ref/B(z): sigma = A * eps_SI.
     // A is computed here from the *registered* field Bfield_fp_external (rather
     // than from a stored MultiFab) so it always uses the current distribution
     // mapping -- a stored MultiFab would go stale when load balancing changes
     // the box-to-rank assignment.
-    using ablastr::fields::Direction;
-    using warpx::fields::FieldType;
-
-    auto & warpx = WarpX::GetInstance();
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
         warpx.m_fields.has(FieldType::Bfield_fp_external, Direction{2}, lev),
         "LabFrameDriftKineticES requires an external grid B field "
