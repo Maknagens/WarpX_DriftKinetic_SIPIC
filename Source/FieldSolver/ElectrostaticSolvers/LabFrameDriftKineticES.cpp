@@ -212,7 +212,7 @@ void LabFrameDriftKineticES::ComputeSpaceChargeField (
     MultiFluidContainer* mfl,
     int max_level)
 {
-    WARPX_PROFILE("LabFrameDriftKineticES::ComputeSpaceChargeField");
+    ABLASTR_PROFILE("LabFrameDriftKineticES::ComputeSpaceChargeField");
 
     using ablastr::fields::MultiLevelScalarField;
     using ablastr::fields::MultiLevelVectorField;
@@ -330,7 +330,7 @@ void LabFrameDriftKineticES::ComputeSigma ( MultiFab& sigma ) const
         auto& mypc = warpx.GetPartContainer();
 
         const auto mult_factor = (
-            C_SI * warpx.getdt(lev) * warpx.getdt(lev) / (4._rt * PhysConst::ep0)
+            C_SI * warpx.getdt(lev) * warpx.getdt(lev) / (4._rt * PhysConst::epsilon_0)
         );
 
         for (auto const& pc : mypc) {
