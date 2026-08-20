@@ -68,6 +68,40 @@ namespace warpx::drift_kinetic
      * \param[in]     lev refinement level that `rho` lives on
      */
     void ScaleChargeDensityByFluxTubeArea (amrex::MultiFab* rho, int lev);
+
+    /** \brief Volume-weighted binomial filter for the flux tube.
+     *
+     * The plain (1/4, 1/2, 1/4) stencil conserves the sum of the array, which
+     * is the total charge only when every cell has the same volume. In the
+     * flux tube the volume is A(z) dz, so filtering the 3D density moves
+     * density from narrow cells into wide ones and changes the total charge.
+     *
+     * This is the flux form of the same pass,
+     *
+     *     v_i = u_i + (1/4)/w_i [ w_{i+1/2}(u_{i+1} - u_i)
+     *                           - w_{i-1/2}(u_i - u_{i-1}) ],
+     *
+     * with w the cell volume factor A(z) and w_{i+-1/2} the face averages.
+     * Written this way the update is the divergence of a two-point diffusive
+     * flux, so sum_i w_i u_i -- the total charge -- telescopes and is
+     * conserved exactly, for any A(z). It reduces to (1/4, 1/2, 1/4) where A
+     * is uniform, leaves constants untouched, and carries no flux through the
+     * physical domain boundaries.
+     *
+     * Mirrors WarpX::ApplyVolumeWeightedFilter, which does the same thing for
+     * radial geometries, and applies `warpx.filter_npass_each_dir` passes.
+     *
+     * \param[out] dst     filtered result
+     * \param[in]  src_mf  unfiltered source
+     * \param[in]  lev     refinement level
+     * \param[in]  scomp   first source component
+     * \param[in]  dcomp   first destination component
+     * \param[in]  ncomp   number of components
+     * \return the number of guard layers of `dst` that hold filtered data
+     */
+    amrex::IntVect ApplyFluxTubeFilter (
+        amrex::MultiFab& dst, const amrex::MultiFab& src_mf,
+        int lev, int scomp, int dcomp, int ncomp);
 }
 
 #endif // WARPX_FLUX_TUBE_AREA_SCALING_H_

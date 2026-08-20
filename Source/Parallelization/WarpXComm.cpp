@@ -12,6 +12,7 @@
 #if (defined WARPX_DIM_RZ) && (defined WARPX_USE_FFT)
 #   include "BoundaryConditions/PML_RZ.H"
 #endif
+#include "FieldSolver/ElectrostaticSolvers/FluxTubeAreaScaling.H"
 #include "Fields.H"
 #include "Filter/BilinearFilter.H"
 #include "Utils/TextMsg.H"
@@ -1850,6 +1851,18 @@ void WarpX::ApplyFilterandSumBoundaryRho (int /*lev*/, int glev, amrex::MultiFab
         MultiFab::Copy(rf, rho, icomp, 0, ncomp, amrex::min(ng, rho.nGrowVect()));
         const IntVect ng_filled = ApplyVolumeWeightedFilter(rf, rho, glev, icomp, 0, ncomp);
         ng_depos_rho.min(ng_filled);
+#elif defined(WARPX_DIM_1D_Z)
+        if (warpx::drift_kinetic::FluxTubeScalingEnabled()) {
+            // Flux-tube geometry: the cell volume is A(z) dz, so the plain
+            // stencil would not conserve total charge. Use the flux form,
+            // seeding the layers it does not reach with the raw deposit.
+            MultiFab::Copy(rf, rho, icomp, 0, ncomp, amrex::min(ng, rho.nGrowVect()));
+            const IntVect ng_filled = warpx::drift_kinetic::ApplyFluxTubeFilter(
+                rf, rho, glev, icomp, 0, ncomp);
+            ng_depos_rho.min(ng_filled);
+        } else {
+            bilinear_filter.ApplyStencil(rf, rho, glev, icomp, 0, ncomp);
+        }
 #else
         bilinear_filter.ApplyStencil(rf, rho, glev, icomp, 0, ncomp);
 #endif
