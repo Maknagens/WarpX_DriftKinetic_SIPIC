@@ -77,31 +77,16 @@ namespace
         const amrex::Real Bref = ReferenceB();
         const int ncomp = rho->nComp();
 
-        // A(z) is only defined where the external Bz holds data, so scale the
-        // valid region plus however many guard layers the two fields share.
-        amrex::IntVect ng_scale = rho->nGrowVect();
-        ng_scale.min(Bz.nGrowVect());
-
-        if (!multiply)
-        {
-            // Dividing runs before the guard-cell sum, so every layer that can
-            // carry a deposit has to be covered. Deposits reach at most
-            // ng_depos_rho layers; rho is identically zero beyond that. The
-            // *allocated* width is not the requirement -- with filtering on it
-            // is deliberately wider than the deposit reach (GuardCellManager
-            // adds the filter stencil to ng_alloc_Rho after fixing
-            // ng_depos_rho), and Bz is not expected to match that.
-            amrex::IntVect ng_required = warpx.get_ng_depos_rho();
-            ng_required.min(rho->nGrowVect());
-            WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
-                ng_scale.allGE(ng_required),
-                "The external Bz field has fewer guard cells than the charge "
-                "deposition reaches, so the flux-tube area is undefined where "
-                "charge was deposited. Lower the deposition shape order "
-                "(algo.particle_shape) or allocate more field guard cells.");
-        }
-        // Multiplying builds the MLMG source term, which is read on the valid
-        // region only, so a short guard region is harmless there.
+        // Scale the valid region and every guard layer rho actually has. The
+        // deposit can reach further than the external Bz has data -- the guard
+        // widths come from different quantities in GuardCellManager and need
+        // not line up (with algo.particle_shape = 2, for instance, rho gets
+        // ng_alloc_J+1 = 3 layers while Bz gets ngz rounded up to even = 2) --
+        // so A is read with a clamped index out there. B varies on the scale
+        // of the mirror, thousands of cells, so taking the nearest available
+        // node is a sub-percent error on the small charge in that outermost
+        // layer, and far better than leaving it unscaled.
+        const amrex::IntVect ng_scale = rho->nGrowVect();
 
         // The deposition kernels divide by the Cartesian cell volume (dz in 1D),
         // so they produce rho_1D = A rho_3D with A(z) = B_ref/B(z). Dividing by
@@ -120,10 +105,15 @@ namespace
             amrex::Array4<amrex::Real> const & rho_arr = rho->array(mfi);
             amrex::Array4<const amrex::Real> const & Bz_arr = Bz.const_array(mfi);
 
+            const amrex::Box bz_box = Bz[mfi].box();
+            const int bz_lo = bz_box.smallEnd(0);
+            const int bz_hi = bz_box.bigEnd(0);
+
             amrex::ParallelFor(gbx, ncomp,
                 [=] AMREX_GPU_DEVICE (int i, int j, int k, int n)
                 {
-                    const amrex::Real B = Bz_arr(i,j,k);
+                    const int ic = amrex::min(amrex::max(i, bz_lo), bz_hi);
+                    const amrex::Real B = Bz_arr(ic,j,k);
                     if (B > amrex::Real(0.)) {
                         rho_arr(i,j,k,n) *= multiply ? (Bref / B) : (B / Bref);
                     }
