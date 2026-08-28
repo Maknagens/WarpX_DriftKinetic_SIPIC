@@ -1282,6 +1282,32 @@ PhysicalParticleContainer::PushP (int lev, Real dt,
 
             const auto t_do_not_gather = do_not_gather;
 
+            // Drift-kinetic: the half-step synchronization push needs the same
+            // mirror force as the main push, otherwise the velocities written to
+            // diagnostics are short by (dt/2) mu dBz/dz. That term is negligible
+            // for ions but dominant for electrons in a field gradient, where it
+            // shows up as a spurious species-asymmetric current.
+#if defined(WARPX_DIM_1D_Z)
+            using warpx::fields::FieldType;
+            const bool drift_kinetic = (pusher_algo == ParticlePusherAlgo::DriftKinetic);
+            auto& warpx_fields = WarpX::GetInstance().m_fields;
+            const bool gather_dbdz = drift_kinetic &&
+                warpx_fields.has(FieldType::dBzdz_fp, lev);
+            const bool gather_bz_dk = drift_kinetic &&
+                warpx_fields.has(FieldType::Bfield_fp_external, ablastr::fields::Direction{2}, lev);
+            amrex::Array4<const amrex::Real> dbdz_arr;
+            amrex::Array4<const amrex::Real> bz_dk_arr;
+            if (gather_dbdz) {
+                dbdz_arr = (*warpx_fields.get(FieldType::dBzdz_fp, lev))[pti].const_array();
+            }
+            if (gather_bz_dk) {
+                bz_dk_arr = (*warpx_fields.get(FieldType::Bfield_fp_external, ablastr::fields::Direction{2}, lev))[pti].const_array();
+            }
+            const amrex::GpuArray<amrex::Real,AMREX_SPACEDIM> dbdz_dinv{ dinv.z };
+            const amrex::GpuArray<amrex::Real,AMREX_SPACEDIM> dbdz_plo{
+                xyzmin.z - static_cast<amrex::Real>(lo.x) / dinv.z };
+#endif
+
             enum exteb_flags : int { no_exteb, has_exteb };
 
             const int exteb_runtime_flag = getExternalEB.isNoOp() ? no_exteb : has_exteb;
@@ -1341,14 +1367,31 @@ PhysicalParticleContainer::PushP (int lev, Real dt,
                                                Byp, Bzp, qp, mass, dt);
                 } else if (pusher_algo == ParticlePusherAlgo::DriftKinetic) {
                     // PushP is a momentum-only synchronization push (used when
-                    // writing diagnostics/checkpoints). The magnetic-mirror
-                    // term needs the gathered dBz/dz, which is not available
-                    // here; it is omitted in this half-step sync (dBdz = 0),
-                    // leaving the parallel electric push.
+                    // writing diagnostics/checkpoints). It carries the same
+                    // mirror force as the main push: without it the velocities
+                    // written out are short by (dt/2) mu dBz/dz, which is
+                    // negligible for ions but dominant for electrons wherever
+                    // the field has a gradient.
                     amrex::ParticleReal qp = q;
                     if (ion_lev){ qp *= ion_lev[ip]; }
+                    amrex::ParticleReal dBdz_sync = 0;
+                    amrex::ParticleReal Bz_sync = Bzp;
+#if defined(WARPX_DIM_1D_Z)
+                    if (!t_do_not_gather) {
+                        if (gather_dbdz) {
+                            dBdz_sync = static_cast<amrex::ParticleReal>(
+                                ablastr::particles::doGatherScalarFieldNodal(
+                                    xp, yp, zp, dbdz_arr, dbdz_dinv, dbdz_plo));
+                        }
+                        if (gather_bz_dk) {
+                            Bz_sync = static_cast<amrex::ParticleReal>(
+                                ablastr::particles::doGatherScalarFieldNodal(
+                                    xp, yp, zp, bz_dk_arr, dbdz_dinv, dbdz_plo));
+                        }
+                    }
+#endif
                     UpdateMomentumDriftKinetic( ux[ip], uy[ip], uz[ip],
-                                                Ezp, Bzp, amrex::ParticleReal(0),
+                                                Ezp, Bz_sync, dBdz_sync,
                                                 qp, mass, dt);
                 } else {
                     amrex::Abort("Unknown particle pusher");
