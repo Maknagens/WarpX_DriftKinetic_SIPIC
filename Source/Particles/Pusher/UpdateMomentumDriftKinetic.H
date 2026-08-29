@@ -7,9 +7,13 @@
 #ifndef WARPX_PARTICLES_PUSHER_UPDATEMOMENTUM_DRIFT_KINETIC_H_
 #define WARPX_PARTICLES_PUSHER_UPDATEMOMENTUM_DRIFT_KINETIC_H_
 
+#include "Utils/WarpXConst.H"
+
 #include <AMReX_Extension.H>
 #include <AMReX_GpuQualifiers.H>
 #include <AMReX_REAL.H>
+
+#include <cmath>
 
 /** \brief Advance a particle's axial momentum over one timestep using the
  *         drift-kinetic (guiding-center) equation of motion.
@@ -47,12 +51,25 @@ void UpdateMomentumDriftKinetic (
     using namespace amrex::literals;
 
     // Magnetic moment (adiabatic invariant), recomputed from the current
-    // perpendicular velocity so that collisions on (ux,uy) are respected.
-    const amrex::ParticleReal v_perp_sq = ux*ux + uy*uy;
-    const amrex::ParticleReal mu = (Bz > 0.0_prt) ? 0.5_prt * v_perp_sq / Bz : 0.0_prt;
+    // perpendicular momentum so that collisions on (ux,uy) are respected.
+    // With WarpX's convention u = gamma*v this is mu/m = p_perp^2/(2 m^2 B),
+    // i.e. already the relativistic invariant; the re-slaving u_perp ~ sqrt(B)
+    // done by the caller conserves it exactly.
+    const amrex::ParticleReal u_perp_sq = ux*ux + uy*uy;
+    const amrex::ParticleReal mu = (Bz > 0.0_prt) ? 0.5_prt * u_perp_sq / Bz : 0.0_prt;
 
-    // Parallel push: electric force plus magnetic-mirror force.
-    uz += dt * ( q * Ez / m - mu * dBdz );
+    // Parallel push: electric force plus magnetic-mirror force,
+    //     du_par/dt = q E_par / m - (mu/gamma) dB/dz.
+    // The electric term carries no gamma because dp/dt = qE is already the
+    // relativistic force law in momentum. The mirror term does: it is the
+    // gradient of the perpendicular energy, and at fixed p_perp a larger gamma
+    // means less transverse velocity, weakening the force by 1/gamma.
+    // Reduces to the non-relativistic form as gamma -> 1.
+    constexpr auto inv_c2 = PhysConst::inv_c2_v<amrex::ParticleReal>;
+    const amrex::ParticleReal inv_gamma =
+        1.0_prt/std::sqrt(1.0_prt + (u_perp_sq + uz*uz)*inv_c2);
+
+    uz += dt * ( q * Ez / m - mu * dBdz * inv_gamma );
 }
 
 #endif // WARPX_PARTICLES_PUSHER_UPDATEMOMENTUM_DRIFT_KINETIC_H_
