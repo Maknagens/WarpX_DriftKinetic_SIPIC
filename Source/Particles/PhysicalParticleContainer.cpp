@@ -1702,13 +1702,28 @@ PhysicalParticleContainer::PushPX (WarpXParIter& pti,
         // than extrapolating) Bz keeps the magnetic moment conserved to the
         // 2nd order of the leapfrog. Bzp still holds the external Bz at z^n.
         if (drift_kinetic && gather_bz_dk && !t_do_not_gather) {
-            const amrex::ParticleReal Bz_new = static_cast<amrex::ParticleReal>(
-                ablastr::particles::doGatherScalarFieldNodal(
-                    xp, yp, zp, bz_dk_arr, dbdz_dinv, dbdz_plo));
-            if (Bzp > 0 && Bz_new > 0) {
-                const amrex::ParticleReal s = std::sqrt(Bz_new / Bzp);
-                ux[ip] *= s;
-                uy[ip] *= s;
+            // This gathers at z^{n+1} from the fab of the tile the particle
+            // started in, so a particle that crossed more than the guard width
+            // in one step would read outside the array. Check the index first:
+            // reading garbage here feeds straight into sqrt(Bz_new/Bzp) and
+            // sends the particle to an unphysical energy, which then makes it
+            // cross even further on the next step. Skipping the re-slaving
+            // leaves mu unconserved for that one step, which is a far smaller
+            // error than the alternative -- and such a particle is about to be
+            // redistributed or absorbed anyway.
+            const int iz_new = static_cast<int>(
+                std::floor((zp - dbdz_plo[0]) * dbdz_dinv[0]));
+            const bool in_range = (iz_new >= bz_dk_arr.begin.x) &&
+                                  (iz_new + 1 < bz_dk_arr.end.x);
+            if (in_range) {
+                const amrex::ParticleReal Bz_new = static_cast<amrex::ParticleReal>(
+                    ablastr::particles::doGatherScalarFieldNodal(
+                        xp, yp, zp, bz_dk_arr, dbdz_dinv, dbdz_plo));
+                if (Bzp > 0 && Bz_new > 0) {
+                    const amrex::ParticleReal s = std::sqrt(Bz_new / Bzp);
+                    ux[ip] *= s;
+                    uy[ip] *= s;
+                }
             }
         }
 #endif
