@@ -1713,8 +1713,8 @@ PhysicalParticleContainer::PushPX (WarpXParIter& pti,
             // redistributed or absorbed anyway.
             const int iz_new = static_cast<int>(
                 std::floor((zp - dbdz_plo[0]) * dbdz_dinv[0]));
-            const bool in_range = (iz_new >= bz_dk_arr.begin.x) &&
-                                  (iz_new + 1 < bz_dk_arr.end.x);
+            const bool in_range = (iz_new >= bz_dk_arr.begin[0]) &&
+                                  (iz_new + 1 < bz_dk_arr.end[0]);
             if (in_range) {
                 const amrex::ParticleReal Bz_new = static_cast<amrex::ParticleReal>(
                     ablastr::particles::doGatherScalarFieldNodal(
