@@ -23,6 +23,7 @@
 #include "FieldSolver/ElectrostaticSolvers/RelativisticExplicitES.H"
 #include "FieldSolver/ElectrostaticSolvers/EffectivePotentialES.H"
 #include "FieldSolver/ElectrostaticSolvers/LabFrameDriftKineticES.H"
+#include "FieldSolver/ElectrostaticSolvers/QuasineutralBoltzmannES.H"
 #include "FieldSolver/FiniteDifferenceSolver/FiniteDifferenceSolver.H"
 #include "FieldSolver/FiniteDifferenceSolver/MacroscopicProperties/MacroscopicProperties.H"
 #include "FieldSolver/FiniteDifferenceSolver/HybridPICModel/HybridPICModel.H"
@@ -421,6 +422,11 @@ WarpX::WarpX ()
     else if (electrostatic_solver_id == ElectrostaticSolverAlgo::LabFrameDriftKinetic)
     {
         m_electrostatic_solver = std::make_unique<LabFrameDriftKineticES>(nlevs_max);
+    }
+    // Initialize the quasineutral Boltzmann-electron solver (no Poisson solve)
+    else if (electrostatic_solver_id == ElectrostaticSolverAlgo::QuasineutralBoltzmann)
+    {
+        m_electrostatic_solver = std::make_unique<QuasineutralBoltzmannES>(nlevs_max);
     }
     else
     {
@@ -2704,6 +2710,7 @@ WarpX::AllocLevelMFs (int lev, const BoxArray& ba, const DistributionMapping& dm
         (electrostatic_solver_id == ElectrostaticSolverAlgo::LabFrameElectroMagnetostatic) ||
         (electrostatic_solver_id == ElectrostaticSolverAlgo::LabFrameEffectivePotential) ||
         (electrostatic_solver_id == ElectrostaticSolverAlgo::LabFrameDriftKinetic) ||
+        (electrostatic_solver_id == ElectrostaticSolverAlgo::QuasineutralBoltzmann) ||
         (electromagnetic_solver_id == ElectromagneticSolverAlgo::HybridPIC) ) {
         rho_ncomps = ncomps;
     }
@@ -2726,7 +2733,8 @@ WarpX::AllocLevelMFs (int lev, const BoxArray& ba, const DistributionMapping& dm
     if (electrostatic_solver_id == ElectrostaticSolverAlgo::LabFrame ||
         electrostatic_solver_id == ElectrostaticSolverAlgo::LabFrameElectroMagnetostatic ||
         electrostatic_solver_id == ElectrostaticSolverAlgo::LabFrameEffectivePotential ||
-        electrostatic_solver_id == ElectrostaticSolverAlgo::LabFrameDriftKinetic )
+        electrostatic_solver_id == ElectrostaticSolverAlgo::LabFrameDriftKinetic ||
+        electrostatic_solver_id == ElectrostaticSolverAlgo::QuasineutralBoltzmann )
     {
         const IntVect ngPhi = IntVect( AMREX_D_DECL(1,1,1) );
         m_fields.alloc_init(FieldType::phi_fp, lev, amrex::convert(ba, phi_nodal_flag), dm,

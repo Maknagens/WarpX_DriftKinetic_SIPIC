@@ -64,6 +64,7 @@ AMREX_ENUM(ElectrostaticSolverAlgo,
            LabFrame,
            LabFrameEffectivePotential,
            LabFrameDriftKinetic,
+           QuasineutralBoltzmann,
            Default = None);
 
 AMREX_ENUM(PoissonSolverAlgo,

@@ -29,7 +29,11 @@ namespace warpx::drift_kinetic
 bool FluxTubeScalingEnabled ()
 {
 #if defined(WARPX_DIM_1D_Z)
-    return (WarpX::electrostatic_solver_id == ElectrostaticSolverAlgo::LabFrameDriftKinetic);
+    // Both flux-tube solvers need the deposited density divided by A(z):
+    // the drift-kinetic one for the semi-implicit dressing, and the
+    // quasineutral one because phi = (T_e/e) ln(n_3D) depends on it directly.
+    return (WarpX::electrostatic_solver_id == ElectrostaticSolverAlgo::LabFrameDriftKinetic) ||
+           (WarpX::electrostatic_solver_id == ElectrostaticSolverAlgo::QuasineutralBoltzmann);
 #else
     return false;
 #endif

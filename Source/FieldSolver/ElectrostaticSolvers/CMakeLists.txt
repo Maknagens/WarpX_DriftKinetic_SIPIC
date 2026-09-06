@@ -8,6 +8,7 @@ foreach(D IN LISTS WarpX_DIMS)
         LabFrameDriftKineticES.cpp
         LabFrameExplicitES.cpp
         PoissonBoundaryHandler.cpp
+        QuasineutralBoltzmannES.cpp
         RelativisticExplicitES.cpp
     )
 endforeach()
