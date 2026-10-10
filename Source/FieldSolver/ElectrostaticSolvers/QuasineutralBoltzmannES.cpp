@@ -61,7 +61,7 @@ void QuasineutralBoltzmannES::InitData ()
 }
 
 void QuasineutralBoltzmannES::ComputePhiFromDensity (
-    amrex::MultiFab const & rho, amrex::MultiFab & phi, [[maybe_unused]] const int lev ) const
+    amrex::MultiFab const & rho, amrex::MultiFab & phi, const int lev ) const
 {
     // rho is the charge density summed over ion species, so n_i = rho/e gives
     // the electron density demanded by quasineutrality for any mix of charge
@@ -72,25 +72,61 @@ void QuasineutralBoltzmannES::ComputePhiFromDensity (
     const Real n_ref     = m_n_ref;
     const Real n_floor   = m_density_floor;
 
-    // Fill the guard cells too: computeE differences phi, so the valid-region
-    // result at the outermost nodes needs one layer beyond it.
-    const amrex::IntVect ng = amrex::min(rho.nGrowVect(), phi.nGrowVect());
-
+    // Evaluate phi on the valid region only. The guard cells are filled
+    // afterwards: ApplyFilterandSumBoundaryRho leaves rho correct in the guard
+    // cells that overlap a neighbouring box, but the layer outside the
+    // *physical* domain has no plasma in it, so evaluating the logarithm there
+    // would clamp to the floor and hand computeE -- which differences
+    // phi(i+1) - phi(i-1) at the boundary node -- an enormous spurious field.
 #ifdef AMREX_USE_OMP
 #pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
 #endif
     for (MFIter mfi(phi, TilingIfNotGPU()); mfi.isValid(); ++mfi)
     {
-        const Box gbx = mfi.growntilebox(ng);
+        const Box bx = mfi.tilebox();
 
         Array4<Real const> const & rho_arr = rho.const_array(mfi);
         Array4<Real>       const & phi_arr = phi.array(mfi);
 
-        amrex::ParallelFor(gbx, [=] AMREX_GPU_DEVICE (int i, int j, int k)
+        amrex::ParallelFor(bx, [=] AMREX_GPU_DEVICE (int i, int j, int k)
         {
-            const Real n_i = std::max(n_floor, rho_arr(i,j,k) * inv_q_e);
+            const Real n_i = amrex::max(n_floor, rho_arr(i,j,k) * inv_q_e);
             phi_arr(i,j,k) = Te * std::log(n_i / n_ref);
         });
+    }
+
+    // Box-to-box and periodic guard cells come from a neighbour's valid data.
+    auto & warpx = WarpX::GetInstance();
+    phi.FillBoundary(warpx.Geom(lev).periodicity());
+
+    // At a physical boundary there is no neighbour, so extrapolate phi with
+    // zero gradient. That gives E = 0 at the wall, which is the honest
+    // statement for a quasineutral model: the sheath is below the resolution
+    // of the approximation, and inventing a field from an empty guard cell
+    // would be worse than admitting there is none.
+    const amrex::Box domain = amrex::convert(warpx.Geom(lev).Domain(),
+                                             phi.ixType().toIntVect());
+    const int dom_lo = domain.smallEnd(0);
+    const int dom_hi = domain.bigEnd(0);
+    const bool periodic = warpx.Geom(lev).periodicity().isPeriodic(0);
+
+    if (!periodic)
+    {
+        const amrex::IntVect ng = phi.nGrowVect();
+#ifdef AMREX_USE_OMP
+#pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
+#endif
+        for (MFIter mfi(phi, TilingIfNotGPU()); mfi.isValid(); ++mfi)
+        {
+            const Box gbx = mfi.growntilebox(ng);
+            Array4<Real> const & phi_arr = phi.array(mfi);
+
+            amrex::ParallelFor(gbx, [=] AMREX_GPU_DEVICE (int i, int j, int k)
+            {
+                if (i < dom_lo) { phi_arr(i,j,k) = phi_arr(dom_lo,j,k); }
+                if (i > dom_hi) { phi_arr(i,j,k) = phi_arr(dom_hi,j,k); }
+            });
+        }
     }
 }
 
