@@ -66,13 +66,13 @@ public:
         MultiFluidContainer* mfl,
         int max_level) override;
 
-private:
-
-    /** \brief Read warpx.boltzmann_* input parameters. */
-    void ReadBoltzmannParameters ();
-
     /** \brief Fill phi = (T_e/e) ln(n_i/n_ref) from the deposited charge
      *         density, applying the density floor.
+     *
+     * This is an implementation detail and would otherwise be private, but it
+     * contains an extended __device__ lambda and nvcc does not allow those in
+     * a function with private or protected access. The other solvers keep
+     * their kernel-bearing helpers public for the same reason.
      *
      * \param[in]  rho charge density (nodal), already area-normalised
      * \param[out] phi potential
@@ -80,6 +80,11 @@ private:
      */
     void ComputePhiFromDensity (
         amrex::MultiFab const & rho, amrex::MultiFab & phi, int lev ) const;
+
+private:
+
+    /** \brief Read warpx.boltzmann_* input parameters. */
+    void ReadBoltzmannParameters ();
 
     /** Electron temperature [eV]. */
     amrex::Real m_Te = 1.0;
