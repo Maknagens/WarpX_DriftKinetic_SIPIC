@@ -157,6 +157,12 @@ amrex::Real LabFrameDriftKineticES::AccumulateWallCharge ()
 
 void LabFrameDriftKineticES::LogWallCharge () const
 {
+    // Nothing to persist unless the wall actually floats: with a Dirichlet
+    // z_hi the collected charge is never injected and m_sigma_wall stays at
+    // zero, so writing it would be one file open/append/close per step for a
+    // constant -- millions of them over a long run, on a shared filesystem.
+    if (!m_zhi_floating) { return; }
+
     // Only the I/O rank maintains the state log.
     if (!ParallelDescriptor::IOProcessor()) { return; }
 

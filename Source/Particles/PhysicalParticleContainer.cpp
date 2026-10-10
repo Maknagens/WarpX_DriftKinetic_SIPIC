@@ -1661,16 +1661,17 @@ PhysicalParticleContainer::PushPX (WarpXParIter& pti,
 #endif
 
 #ifdef WARPX_QED
-        // The drift-kinetic pusher is not used together with QED; the QED
-        // branch leaves dBdz at its default (0).
-        amrex::ignore_unused(dBdz);
+        // dBdz has to be passed here too. WarpX_QED defaults to ON, so this is
+        // the branch an ordinary build takes for every species, QED active or
+        // not -- omitting dBdz would leave the mirror force silently at zero
+        // for the whole simulation.
         if (!do_sync) {
             doParticleMomentumPush<0>(ux[ip], uy[ip], uz[ip],
                                           Exp, Eyp, Ezp, Bxp, Byp, Bzp,
                                           ion_lev ? ion_lev[ip] : 1,
                                           mass, q, pusher_algo, do_crr,
                                           t_chi_max,
-                                          dt, momentum_push_type);
+                                          dt, momentum_push_type, dBdz);
         } else {
             if constexpr (qed_control == has_qed) {
                 doParticleMomentumPush<1>(ux[ip], uy[ip], uz[ip],
@@ -1678,7 +1679,7 @@ PhysicalParticleContainer::PushPX (WarpXParIter& pti,
                                               ion_lev ? ion_lev[ip] : 1,
                                               mass, q, pusher_algo, do_crr,
                                               t_chi_max,
-                                              dt, momentum_push_type);
+                                              dt, momentum_push_type, dBdz);
             }
         }
 #else
