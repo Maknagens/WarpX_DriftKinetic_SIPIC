@@ -10,6 +10,7 @@
  */
 #include "PhysicalParticleContainer.H"
 
+#include "FieldSolver/ElectrostaticSolvers/FluxTubeAreaScaling.H"
 #include "Fields.H"
 #include "Filter/NCIGodfreyFilter.H"
 #include "Initialization/PlasmaInjector.H"
@@ -24,6 +25,7 @@
 #include "Particles/Gather/GetExternalFields.H"
 #include "Particles/ParticleCreation/DefaultInitialization.H"
 #include "Particles/Pusher/CopyParticleAttribs.H"
+#include "Particles/Pusher/GatherAxialFieldAndGradient.H"
 #include "Particles/Pusher/GetAndSetPosition.H"
 #include "Particles/Pusher/PushSelector.H"
 #include "Particles/Pusher/UpdateMomentumBoris.H"
@@ -49,7 +51,6 @@
 #include <ablastr/profiler/ProfilerWrapper.H>
 #include <ablastr/warn_manager/WarnManager.H>
 #include <ablastr/utils/Communication.H>
-#include <ablastr/particles/NodalFieldGather.H>
 
 #include <AMReX.H>
 #include <AMReX_Algorithm.H>
@@ -1291,21 +1292,18 @@ PhysicalParticleContainer::PushP (int lev, Real dt,
             using warpx::fields::FieldType;
             const bool drift_kinetic = (pusher_algo == ParticlePusherAlgo::DriftKinetic);
             auto& warpx_fields = WarpX::GetInstance().m_fields;
-            const bool gather_dbdz = drift_kinetic &&
-                warpx_fields.has(FieldType::dBzdz_fp, lev);
             const bool gather_bz_dk = drift_kinetic &&
                 warpx_fields.has(FieldType::Bfield_fp_external, ablastr::fields::Direction{2}, lev);
-            amrex::Array4<const amrex::Real> dbdz_arr;
             amrex::Array4<const amrex::Real> bz_dk_arr;
-            if (gather_dbdz) {
-                dbdz_arr = (*warpx_fields.get(FieldType::dBzdz_fp, lev))[pti].const_array();
-            }
             if (gather_bz_dk) {
                 bz_dk_arr = (*warpx_fields.get(FieldType::Bfield_fp_external, ablastr::fields::Direction{2}, lev))[pti].const_array();
             }
-            const amrex::GpuArray<amrex::Real,AMREX_SPACEDIM> dbdz_dinv{ dinv.z };
-            const amrex::GpuArray<amrex::Real,AMREX_SPACEDIM> dbdz_plo{
-                xyzmin.z - static_cast<amrex::Real>(lo.x) / dinv.z };
+            // Nodal mapping of Bfield_fp_external, and the B-spline order used
+            // for both B and dB/dz (they must agree -- see
+            // GatherAxialFieldAndGradient.H).
+            const amrex::Real bz_dzi = dinv.z;
+            const amrex::Real bz_zlo = xyzmin.z - static_cast<amrex::Real>(lo.x) / dinv.z;
+            const int bz_order = warpx::drift_kinetic::BInterpOrder();
 #endif
 
             enum exteb_flags : int { no_exteb, has_exteb };
@@ -1377,17 +1375,19 @@ PhysicalParticleContainer::PushP (int lev, Real dt,
                     amrex::ParticleReal dBdz_sync = 0;
                     amrex::ParticleReal Bz_sync = Bzp;
 #if defined(WARPX_DIM_1D_Z)
-                    if (!t_do_not_gather) {
-                        if (gather_dbdz) {
-                            dBdz_sync = static_cast<amrex::ParticleReal>(
-                                ablastr::particles::doGatherScalarFieldNodal(
-                                    xp, yp, zp, dbdz_arr, dbdz_dinv, dbdz_plo));
+                    if (gather_bz_dk && !t_do_not_gather) {
+                        // One gather yields B and the exact derivative of the
+                        // same interpolant, as in the main push.
+                        amrex::Real b = amrex::Real(0.), dbdz = amrex::Real(0.);
+                        if (bz_order == 2) {
+                            warpx::drift_kinetic::doGatherAxialFieldAndGradient<2>(
+                                zp, bz_dk_arr, bz_dzi, bz_zlo, b, dbdz);
+                        } else {
+                            warpx::drift_kinetic::doGatherAxialFieldAndGradient<1>(
+                                zp, bz_dk_arr, bz_dzi, bz_zlo, b, dbdz);
                         }
-                        if (gather_bz_dk) {
-                            Bz_sync = static_cast<amrex::ParticleReal>(
-                                ablastr::particles::doGatherScalarFieldNodal(
-                                    xp, yp, zp, bz_dk_arr, dbdz_dinv, dbdz_plo));
-                        }
+                        Bz_sync   = static_cast<amrex::ParticleReal>(b);
+                        dBdz_sync = static_cast<amrex::ParticleReal>(dbdz);
                     }
 #endif
                     UpdateMomentumDriftKinetic( ux[ip], uy[ip], uz[ip],
@@ -1545,35 +1545,50 @@ PhysicalParticleContainer::PushPX (WarpXParIter& pti,
 
     const auto t_do_not_gather = do_not_gather;
 
-    // Drift-kinetic pusher: gather Bz and its axial gradient dBz/dz from the
-    // input-parser external fields (z-component of Bfield_fp_external, and the
-    // nodal scalar dBzdz_fp). Both are recomputed every run -- including on
-    // restart -- in WarpX::LoadExternalFields, so using them rather than the
-    // checkpointed Bfield_aux lets a restart continue a saturated plasma state
-    // under a *different* magnetic field. The magnetic moment mu is recomputed
-    // from (ux,uy) inside the pusher each step. This mirror model is 1D.
+    // Drift-kinetic pusher: gather Bz and its axial gradient from the nodal
+    // z-component of Bfield_fp_external, which is rebuilt from the input
+    // parser on every run -- including on restart -- in
+    // WarpX::LoadExternalFields. Using it rather than the checkpointed
+    // Bfield_aux lets a restart continue a saturated plasma state under a
+    // *different* magnetic field. The gradient is the analytic derivative of
+    // the same B-spline that produces Bz, which is what makes the mirror force
+    // and the magnetic-moment re-slaving conserve energy as a pair; see
+    // Particles/Pusher/GatherAxialFieldAndGradient.H. The magnetic moment mu
+    // is recomputed from (ux,uy) inside the pusher each step. This mirror
+    // model is 1D.
 #if defined(WARPX_DIM_1D_Z)
     using warpx::fields::FieldType;
     const bool drift_kinetic = (pusher_algo == ParticlePusherAlgo::DriftKinetic);
     auto& warpx_fields = WarpX::GetInstance().m_fields;
-    const bool gather_dbdz = drift_kinetic && (lev == gather_lev) &&
-        warpx_fields.has(FieldType::dBzdz_fp, gather_lev);
     const bool gather_bz_dk = drift_kinetic && (lev == gather_lev) &&
         warpx_fields.has(FieldType::Bfield_fp_external, ablastr::fields::Direction{2}, gather_lev);
-    amrex::Array4<const amrex::Real> dbdz_arr;
     amrex::Array4<const amrex::Real> bz_dk_arr;
-    if (gather_dbdz) {
-        dbdz_arr = (*warpx_fields.get(FieldType::dBzdz_fp, gather_lev))[pti].const_array();
-    }
     if (gather_bz_dk) {
         bz_dk_arr = (*warpx_fields.get(FieldType::Bfield_fp_external, ablastr::fields::Direction{2}, gather_lev))[pti].const_array();
     }
-    // Inverse cell size and physical origin of index 0, in the convention used
-    // by ablastr::particles::doGatherScalarFieldNodal. Both dBzdz_fp and the
-    // z-component of Bfield_fp_external are nodal, so they share this mapping.
-    const amrex::GpuArray<amrex::Real,AMREX_SPACEDIM> dbdz_dinv{ dinv.z };
-    const amrex::GpuArray<amrex::Real,AMREX_SPACEDIM> dbdz_plo{
-        xyzmin.z - static_cast<amrex::Real>(lo.x) / dinv.z };
+    // Inverse cell size and physical position of node index 0 of the fab. The
+    // external Bz is nodal in z (Bz_nodal_flag = IntVect(1) in 1D), so this is
+    // the mapping the gather uses.
+    const amrex::Real bz_dzi = dinv.z;
+    const amrex::Real bz_zlo = xyzmin.z - static_cast<amrex::Real>(lo.x) / dinv.z;
+    // B-spline order for B and its gradient. Order 2 (the default) is
+    // second-order accurate and the one to use; order 1 is first-order and
+    // drifts slightly on cell crossings, and is kept only for comparison.
+    // Not tied to algo.particle_shape, which governs the self-consistent E
+    // and rho.
+    const int bz_order = warpx::drift_kinetic::BInterpOrder();
+    if (gather_bz_dk && bz_order == 2) {
+        // Centred on the nearest node, the order-2 stencil reaches one node
+        // beyond the cell the particle is in, so a particle in the first or
+        // last cell of a box reads a guard node. Those are filled for the
+        // whole grown box by ComputeExternalFieldOnGridUsingParser, which is
+        // also why the analytic B must stay positive just outside the domain.
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            warpx_fields.get(FieldType::Bfield_fp_external,
+                             ablastr::fields::Direction{2}, gather_lev)->nGrowVect()[0] >= 1,
+            "warpx.drift_kinetic_B_interp_order = 2 needs at least one guard "
+            "cell on the external Bz; use order 1 instead.");
+    }
 #endif
 
     enum exteb_flags : int { no_exteb, has_exteb };
@@ -1639,24 +1654,24 @@ PhysicalParticleContainer::PushPX (WarpXParIter& pti,
             copyAttribs(ip);
         }
 
-        // Drift-kinetic pusher: gather Bz and dBz/dz from the parser-derived
-        // external fields. The magnetic moment is recomputed inside the pusher.
+        // Drift-kinetic pusher: one gather of the parser-derived external Bz
+        // yields both B (overriding the staggered gather above, so a restart
+        // uses the new magnetic field rather than the checkpointed one) and
+        // dB/dz as the analytic derivative of that same interpolation. The
+        // magnetic moment is recomputed inside the pusher.
         amrex::ParticleReal dBdz = 0;
 #if defined(WARPX_DIM_1D_Z)
-        if (drift_kinetic && !t_do_not_gather) {
-            if (gather_dbdz) {
-                dBdz = static_cast<amrex::ParticleReal>(
-                    ablastr::particles::doGatherScalarFieldNodal(
-                        xp, yp, zp, dbdz_arr, dbdz_dinv, dbdz_plo));
+        if (gather_bz_dk && !t_do_not_gather) {
+            amrex::Real b = amrex::Real(0.), dbdz = amrex::Real(0.);
+            if (bz_order == 2) {
+                warpx::drift_kinetic::doGatherAxialFieldAndGradient<2>(
+                    zp, bz_dk_arr, bz_dzi, bz_zlo, b, dbdz);
+            } else {
+                warpx::drift_kinetic::doGatherAxialFieldAndGradient<1>(
+                    zp, bz_dk_arr, bz_dzi, bz_zlo, b, dbdz);
             }
-            if (gather_bz_dk) {
-                // Override the gathered Bz with the input-parser value, so a
-                // restart uses the new magnetic field rather than the
-                // checkpointed one.
-                Bzp = static_cast<amrex::ParticleReal>(
-                    ablastr::particles::doGatherScalarFieldNodal(
-                        xp, yp, zp, bz_dk_arr, dbdz_dinv, dbdz_plo));
-            }
+            Bzp  = static_cast<amrex::ParticleReal>(b);
+            dBdz = static_cast<amrex::ParticleReal>(dbdz);
         }
 #endif
 
@@ -1698,11 +1713,12 @@ PhysicalParticleContainer::PushPX (WarpXParIter& pti,
 #if defined(WARPX_DIM_1D_Z)
         // Drift-kinetic pusher: re-slave the perpendicular speed to the
         // adiabatic invariant at the updated position. Bz is gathered again at
-        // the post-push position z^{n+1}, and (ux,uy) are rescaled by
-        // sqrt(Bz(z^{n+1})/Bz(z^n)), keeping their direction. Gathering (rather
-        // than extrapolating) Bz keeps the magnetic moment conserved to the
-        // 2nd order of the leapfrog. Bzp still holds the external Bz at z^n.
-        if (drift_kinetic && gather_bz_dk && !t_do_not_gather) {
+        // the post-push position z^{n+1} -- with the same B-spline order as
+        // above, so that mu B_p is transported by exactly the interpolant whose
+        // derivative drove the parallel kick -- and (ux,uy) are rescaled by
+        // sqrt(Bz(z^{n+1})/Bz(z^n)), keeping their direction. Bzp still holds
+        // the external Bz at z^n.
+        if (gather_bz_dk && !t_do_not_gather) {
             // This gathers at z^{n+1} from the fab of the tile the particle
             // started in, so a particle that crossed more than the guard width
             // in one step would read outside the array. Check the index first:
@@ -1712,14 +1728,23 @@ PhysicalParticleContainer::PushPX (WarpXParIter& pti,
             // leaves mu unconserved for that one step, which is a far smaller
             // error than the alternative -- and such a particle is about to be
             // redistributed or absorbed anyway.
-            const int iz_new = static_cast<int>(
-                std::floor((zp - dbdz_plo[0]) * dbdz_dinv[0]));
-            const bool in_range = (iz_new >= bz_dk_arr.begin[0]) &&
-                                  (iz_new + 1 < bz_dk_arr.end[0]);
+            const amrex::Real zn_new =
+                (static_cast<amrex::Real>(zp) - bz_zlo) * bz_dzi;
+            int imin = 0, imax = 0;
+            if (bz_order == 2) {
+                warpx::drift_kinetic::axialStencilRange<2>(zn_new, imin, imax);
+            } else {
+                warpx::drift_kinetic::axialStencilRange<1>(zn_new, imin, imax);
+            }
+            const bool in_range = (imin >= bz_dk_arr.begin[0]) &&
+                                  (imax <  bz_dk_arr.end[0]);
             if (in_range) {
                 const amrex::ParticleReal Bz_new = static_cast<amrex::ParticleReal>(
-                    ablastr::particles::doGatherScalarFieldNodal(
-                        xp, yp, zp, bz_dk_arr, dbdz_dinv, dbdz_plo));
+                    (bz_order == 2)
+                        ? warpx::drift_kinetic::doGatherAxialField<2>(
+                              zp, bz_dk_arr, bz_dzi, bz_zlo)
+                        : warpx::drift_kinetic::doGatherAxialField<1>(
+                              zp, bz_dk_arr, bz_dzi, bz_zlo));
                 if (Bzp > 0 && Bz_new > 0) {
                     const amrex::ParticleReal s = std::sqrt(Bz_new / Bzp);
                     ux[ip] *= s;

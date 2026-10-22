@@ -52,6 +52,25 @@ amrex::Real ReferenceB ()
     return B_ref;
 }
 
+int BInterpOrder ()
+{
+    // Static input, but this is read once per tile in the particle push.
+    static const int order = [] () {
+        int o = 2;
+        const amrex::ParmParse pp_warpx("warpx");
+        utils::parser::queryWithParser(pp_warpx, "drift_kinetic_B_interp_order", o);
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            o == 1 || o == 2,
+            "warpx.drift_kinetic_B_interp_order must be 1 or 2: it selects the "
+            "B-spline order used for the external Bz and its exact axial "
+            "derivative in the drift-kinetic push. 2 (the default) is "
+            "second-order accurate; 1 is first-order and drifts slightly on "
+            "cell crossings, and is kept only for comparison.");
+        return o;
+    }();
+    return order;
+}
+
 namespace
 {
     /** \brief Scale a nodal charge density by a power of the flux-tube area.

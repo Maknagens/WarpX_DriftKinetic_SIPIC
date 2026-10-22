@@ -2889,15 +2889,6 @@ WarpX::AllocLevelMFs (int lev, const BoxArray& ba, const DistributionMapping& dm
             amrex::convert(ba, m_fields.get(FieldType::Bfield_fp,Direction{2},lev)->ixType()),
             dm, ncomps, ngEB, 0.0_rt);
 
-#if defined(WARPX_DIM_1D_Z)
-        // Axial gradient dBz/dz of the external magnetic field, used by the
-        // drift-kinetic pusher. It is a nodal scalar field, computed once from
-        // Bfield_fp_external in WarpX::LoadExternalFields. The drift-kinetic
-        // mirror model is a 1D (along-field-line) model, hence 1D only.
-        m_fields.alloc_init(FieldType::dBzdz_fp, lev,
-            amrex::convert(ba, amrex::IntVect::TheNodeVector()),
-            dm, ncomps, ngEB, 0.0_rt);
-#endif
     }
     if (mypc->m_B_ext_particle_s == "read_from_file") {
         //  These fields will be added to the fields that the particles see, and need to match the index type

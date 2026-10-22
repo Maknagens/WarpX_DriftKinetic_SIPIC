@@ -48,6 +48,17 @@ namespace warpx::drift_kinetic
      */
     amrex::Real ReferenceB ();
 
+    /** \brief Interpolation order used for the external Bz and its axial
+     *         gradient in the drift-kinetic push.
+     *
+     * Read from `warpx.drift_kinetic_B_interp_order`; 1 or 2, default 2. Both
+     * the mirror force and the magnetic-moment re-slaving use this one order,
+     * which is what makes the pair energy-conserving (see
+     * Particles/Pusher/GatherAxialFieldAndGradient.H). It is independent of
+     * `algo.particle_shape`, which governs the self-consistent E and rho.
+     */
+    int BInterpOrder ();
+
     /** \brief Divide a deposited charge density by the flux-tube area A(z),
      *         converting charge-per-unit-length into a 3D charge density.
      *
