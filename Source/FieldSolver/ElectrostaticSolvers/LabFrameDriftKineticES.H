@@ -106,12 +106,20 @@ private:
     /** \brief Read drift-kinetic / floating-wall input parameters. */
     void ReadDriftKineticParameters ();
 
-    /** \brief Accumulate the charge collected at the floating z_hi wall into
-     *         m_sigma_wall and return it. Clears the z_hi boundary buffer. */
+    /** \brief Accumulate the charge collected at the z_hi wall into
+     *         m_sigma_wall and return it.
+     *
+     * Reads the z_hi particle boundary buffer without modifying it, selecting
+     * the particles whose "stepScraped" stamp is the current step. The buffer
+     * is therefore left intact for whatever else consumes it (a
+     * BoundaryScrapingDiagnostic, a Python callback), exactly as in a run with
+     * any other solver. Runs for a Dirichlet z_hi too, where the tally is a
+     * diagnostic only and no charge sheet is injected. */
     amrex::Real AccumulateWallCharge ();
 
-    /** \brief Append (I/O rank only) the current step and m_sigma_wall to the
-     *         floating-wall state log. Called once per step. */
+    /** \brief Append (I/O rank only) the current step, m_sigma_wall and the
+     *         per-step increment to the wall-charge state log. Called once per
+     *         step, for a floating and a Dirichlet z_hi alike. */
     void LogWallCharge () const;
 
     /** \brief Seed m_sigma_wall on restart from the state log (matching the
@@ -143,8 +151,18 @@ private:
      *  checkpointed history. */
     mutable bool m_overwrite_sigma = true;
 
-    /** Accumulated surface charge collected at the floating z_hi wall. */
+    /** Accumulated surface charge collected at the z_hi wall. Injected as a
+     *  charge sheet only when the wall floats; tallied either way. */
     amrex::Real m_sigma_wall = 0.0;
+
+    /** Step whose z_hi arrivals have already been tallied, so that a second
+     *  solve on the same step does not count them again. */
+    int m_last_wall_step = -1;
+
+    /** Charge collected at the z_hi wall on the current step, i.e. the
+     *  increment of m_sigma_wall. Logged so that the wall current does not
+     *  have to be recovered by differencing a running total. */
+    amrex::Real m_dsigma_wall = 0.0;
 
     /** z_hi wall mode, set in InitData from the z_hi field BC: true => floating
      *  (Neumann + charge sheet), false => Dirichlet (fixed potential). */

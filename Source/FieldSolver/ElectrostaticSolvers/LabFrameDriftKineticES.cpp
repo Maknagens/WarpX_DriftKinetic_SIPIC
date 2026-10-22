@@ -21,8 +21,10 @@
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <cstddef>
 #include <fstream>
 #include <iomanip>
+#include <sstream>
 #include <string>
 
 using namespace amrex;
@@ -93,12 +95,23 @@ void LabFrameDriftKineticES::InitData ()
     // The z_hi wall follows the z_hi field boundary condition:
     //   Neumann   -> floating wall (collected charge injected as a sheet)
     //   Dirichlet -> fixed-potential wall (boundary.potential_hi_z, no sheet)
-    // The z_hi particle buffer is drained by AccumulateWallCharge either way.
+    // Either way the collected charge is tallied for the state log, and the
+    // z_hi particle boundary buffer is only read, never drained: a Dirichlet
+    // z_hi therefore behaves exactly like one in any other WarpX run, and the
+    // buffer stays available to a BoundaryScrapingDiagnostic or a callback.
     m_zhi_floating =
         (m_poisson_boundary_handler->hibc[WARPX_ZINDEX] == amrex::LinOpBCType::Neumann);
     amrex::Print() << "LabFrameDriftKineticES: z_hi wall = "
-                   << (m_zhi_floating ? "floating (Neumann + charge sheet)"
-                                      : "Dirichlet (fixed potential)") << '\n';
+                   << (m_zhi_floating
+                       ? "floating (Neumann + charge sheet); the collected "
+                         "charge is dynamic state"
+                       : "Dirichlet (fixed potential); the collected charge is "
+                         "a diagnostic only")
+                   << ", logged to '" << m_wall_charge_log
+                   << "' as 'step  sigma  dsigma'. It is zero unless "
+                      "<species>.save_particles_at_zhi = 1; that buffer is "
+                      "read, never drained, so a BoundaryScrapingDiagnostic on "
+                      "z_hi still sees every particle.\n";
 #endif
 
     RestoreWallCharge();
@@ -116,9 +129,29 @@ amrex::Real LabFrameDriftKineticES::AccumulateWallCharge ()
     // Index of the z_hi boundary in the ParticleBoundaryBuffer (idim*2 + side).
     const int zhi = 2 * WARPX_ZINDEX + 1;
 
+    // Counting by timestamp (below) means a second solve on the same step
+    // would tally the same arrivals twice -- the old draining version was
+    // idempotent by accident. ComputeSpaceChargeField runs once per step in
+    // Evolve, but it is also reachable from Python, so make that explicit.
+    // This is checked before the collective reduction and the step index is
+    // the same on every rank, so all ranks take the same branch.
+    const int this_step = warpx.getistep(0);
+    if (this_step == m_last_wall_step) { return m_sigma_wall; }
+    m_last_wall_step = this_step;
+
     Real dq = 0.0_rt;
     if (bb.isDefinedForAnySpecies(zhi))
     {
+        // Every scraped particle is stamped with the step it was collected on.
+        // HandleParticlesAtBoundaries (which fills the buffer) and this solve
+        // both run after istep was incremented, inside the same iteration of
+        // the Evolve loop, so getistep(0) here is the stamp that this step's
+        // arrivals carry. Selecting on it, instead of draining the buffer,
+        // is what keeps the tally exact *and* non-destructive: WarpX never
+        // clears the boundary buffer itself -- only a BoundaryScrapingDiagnostic
+        // or user code does, after reading it -- and neither do we. Each
+        // particle is counted on exactly one step however long it then sits
+        // in the buffer.
         const std::vector<std::string> species_names = mpc.GetSpeciesNames();
         for (int s = 0; s < mpc.nSpecies(); ++s)
         {
@@ -129,15 +162,27 @@ amrex::Real LabFrameDriftKineticES::AccumulateWallCharge ()
             auto * buf_ptr = bb.getParticleBufferPointer(species_names[s], zhi);
             if (buf_ptr == nullptr || !buf_ptr->isDefined()) { continue; }
 
+            // "stepScraped" is added to every boundary buffer when it is
+            // defined (ParticleBoundaryBuffer::gatherParticles), so a defined
+            // buffer always has it. GetIntCompIndex is the flat index over
+            // compile-time plus runtime int components, which is what the
+            // SoA's GetIntData(int) expects.
+            const int step_comp = buf_ptr->GetIntCompIndex("stepScraped");
+
             const Real q = mpc.GetParticleContainer(s).getCharge();
 
-            // Sum the weights of all particles collected at z_hi (the buffer
-            // lives in pinned host memory, so a host loop is fine).
+            // Sum the weights of the particles collected at z_hi on this step
+            // (the buffer lives in pinned host memory, so a host loop is fine).
             Real wsum = 0.0_rt;
             for (int lev = 0; lev <= buf_ptr->finestLevel(); ++lev) {
                 for (auto const& kv : buf_ptr->GetParticles(lev)) {
-                    auto const& wcomp = kv.second.GetStructOfArrays().GetRealData(PIdx::w);
-                    for (auto const w : wcomp) { wsum += w; }
+                    auto const& soa   = kv.second.GetStructOfArrays();
+                    auto const& wcomp = soa.GetRealData(PIdx::w);
+                    auto const& scomp = soa.GetIntData(step_comp);
+                    const auto np = static_cast<std::size_t>(wcomp.size());
+                    for (std::size_t ip = 0; ip < np; ++ip) {
+                        if (scomp[ip] == this_step) { wsum += wcomp[ip]; }
+                    }
                 }
             }
             dq += q * wsum;
@@ -146,10 +191,8 @@ amrex::Real LabFrameDriftKineticES::AccumulateWallCharge ()
     // Net charge collected this step, summed across MPI ranks.
     ParallelDescriptor::ReduceRealSum(dq);
 
-    m_sigma_wall += dq;
-
-    // Clear the z_hi buffer so the next step only sees newly collected particles.
-    bb.clearParticles(zhi);
+    m_sigma_wall  += dq;
+    m_dsigma_wall  = dq;
 #endif
 
     return m_sigma_wall;
@@ -157,11 +200,12 @@ amrex::Real LabFrameDriftKineticES::AccumulateWallCharge ()
 
 void LabFrameDriftKineticES::LogWallCharge () const
 {
-    // Nothing to persist unless the wall actually floats: with a Dirichlet
-    // z_hi the collected charge is never injected and m_sigma_wall stays at
-    // zero, so writing it would be one file open/append/close per step for a
-    // constant -- millions of them over a long run, on a shared filesystem.
-    if (!m_zhi_floating) { return; }
+    // Written whether or not the wall floats. For a floating wall this log is
+    // also the checkpoint persistence of m_sigma_wall (see RestoreWallCharge);
+    // for a Dirichlet wall it is purely a diagnostic, and the useful column is
+    // the third one: dq/dt = dsigma/dt is the net charge current into the wall,
+    // so dsigma/(dt*A_wall) is the current density and the running sigma says
+    // how far from ambipolar the losses have been.
 
     // Only the I/O rank maintains the state log.
     if (!ParallelDescriptor::IOProcessor()) { return; }
@@ -169,7 +213,8 @@ void LabFrameDriftKineticES::LogWallCharge () const
     const int step = WarpX::GetInstance().getistep(0);
     std::ofstream ofs(m_wall_charge_log, std::ios::app);
     if (ofs.is_open()) {
-        ofs << step << '\t' << std::setprecision(17) << m_sigma_wall << '\n';
+        ofs << step << '\t' << std::setprecision(17) << m_sigma_wall
+                    << '\t' << std::setprecision(17) << m_dsigma_wall << '\n';
     }
 }
 
@@ -177,7 +222,7 @@ void LabFrameDriftKineticES::RestoreWallCharge ()
 {
     // Checkpoint persistence for m_sigma_wall. It is a single scalar carried by
     // no registered field, so it is mirrored to a plain-text log -- one
-    // "step <tab> value" line per step, written by LogWallCharge(). On restart
+    // "step <tab> sigma <tab> dsigma" line per step, written by LogWallCharge(). On restart
     // we recover it from that log; on a fresh run we start the log clean. This
     // keeps the floating wall checkpoint-compatible without modifying core
     // WarpX checkpoint I/O.
@@ -219,13 +264,19 @@ void LabFrameDriftKineticES::RestoreWallCharge ()
             if (chk_step >= 0)
             {
                 std::ifstream ifs(m_wall_charge_log);
-                long s = 0;
-                amrex::Real v = 0.0_rt;
+                std::string line;
                 // Most recent log entry at or before the checkpoint step
                 // (exact in the common case; tolerates a +-1 step offset in
-                // the step <-> checkpoint-name convention).
-                while (ifs >> s >> v)
+                // the step <-> checkpoint-name convention). Parsed line by
+                // line so that trailing columns -- the per-step increment, or
+                // anything added later -- cannot slide into the next record,
+                // which a bare `ifs >> s >> v` loop would do.
+                while (std::getline(ifs, line))
                 {
+                    std::istringstream iss(line);
+                    long s = 0;
+                    amrex::Real v = 0.0_rt;
+                    if (!(iss >> s >> v)) { continue; }
                     if (s <= chk_step && s >= best_step) { best_step = s; restored = v; }
                 }
             }
@@ -297,17 +348,17 @@ void LabFrameDriftKineticES::ComputeSpaceChargeField (
         warpx::drift_kinetic::ScaleChargeDensityByFluxTubeArea(rho_fp[lev], lev);
     }
 
-    // Floating right (z_hi) wall: accumulate the charge collected there and
-    // inject it as a charge sheet into rho at the boundary node. With a
-    // homogeneous Neumann field BC at z_hi this is the dynamic-Neumann
-    // (charge-sheet) floating-wall condition.
+    // Tally the charge collected at the z_hi wall. This is a read of the z_hi
+    // particle boundary buffer, not a drain of it, so it is harmless for a
+    // Dirichlet wall and does not compete with a BoundaryScrapingDiagnostic.
     const Real sigma_wall = AccumulateWallCharge();
-    // Persist the running wall charge so it survives checkpoint/restart.
+    // Mirror the running total to a text log: checkpoint persistence for a
+    // floating wall, a wall-current diagnostic for a Dirichlet one.
     LogWallCharge();
 #if defined(WARPX_DIM_1D_Z)
     // Floating (Neumann) z_hi wall: inject the collected charge as a sheet at
     // the boundary node. A Dirichlet z_hi wall pins the potential instead, so
-    // no sheet is added -- but the wall buffer is still drained above.
+    // no sheet is added and rho at the boundary node is left as deposited.
     if (m_zhi_floating)
     {
         const Real dz = warpx.Geom(0).CellSize(0);
@@ -329,8 +380,10 @@ void LabFrameDriftKineticES::ComputeSpaceChargeField (
     ignore_unused(sigma_wall);
 #endif
 
-    // set the boundary potentials appropriately (z_lo grounded Dirichlet;
-    // z_hi is a homogeneous Neumann boundary -> left untouched here)
+    // Pin phi on whichever boundaries are Dirichlet, to boundary.potential_*
+    // (the base-class implementation, gated on dirichlet_flag). A Neumann
+    // boundary is left untouched here: for z_hi that is the floating wall,
+    // whose condition is the charge sheet added above instead.
     setPhiBC(phi_fp, warpx.gett_new(0));
 
     // perform phi calculation
