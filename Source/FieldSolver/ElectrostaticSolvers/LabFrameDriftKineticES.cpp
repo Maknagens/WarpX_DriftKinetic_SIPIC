@@ -344,8 +344,23 @@ void LabFrameDriftKineticES::ComputeSpaceChargeField (
     // reflection -- therefore acts on the physical density n_3D; only the MLMG
     // source is extensive. ComputeSigma supplies the matching A on the
     // left-hand side.
+    //
+    // The scaling goes into a scratch copy rather than into rho_fp itself.
+    // rho_fp is a registered field that outlives this call -- the rho
+    // diagnostic, the Python RhoFPWrapper and anything else reading it expect
+    // the 3D density this solver promises, and the solver does not restore the
+    // units afterwards (computeEffectivePotentialPhi multiplies rho by
+    // -1/eps0 and back, so whatever is handed to it survives the solve). The
+    // extra nodal MultiFab is one scalar array on one level.
+    amrex::Vector<amrex::MultiFab> rhs_data(num_levels);
+    ablastr::fields::MultiLevelScalarField rhs(num_levels);
     for (int lev = 0; lev < num_levels; lev++) {
-        warpx::drift_kinetic::ScaleChargeDensityByFluxTubeArea(rho_fp[lev], lev);
+        const amrex::MultiFab & src = *rho_fp[lev];
+        rhs_data[lev].define(src.boxArray(), src.DistributionMap(),
+                             src.nComp(), src.nGrowVect());
+        amrex::MultiFab::Copy(rhs_data[lev], src, 0, 0, src.nComp(), src.nGrowVect());
+        warpx::drift_kinetic::ScaleChargeDensityByFluxTubeArea(&rhs_data[lev], lev);
+        rhs[lev] = &rhs_data[lev];
     }
 
     // Tally the charge collected at the z_hi wall. This is a read of the z_hi
@@ -364,7 +379,7 @@ void LabFrameDriftKineticES::ComputeSpaceChargeField (
         const Real dz = warpx.Geom(0).CellSize(0);
         const int khi = warpx.Geom(0).Domain().bigEnd(0) + 1; // last (nodal) z index
         const Real rho_wall = sigma_wall / dz;
-        MultiFab & rho0 = *rho_fp[0];
+        MultiFab & rho0 = *rhs[0];
         for (MFIter mfi(rho0); mfi.isValid(); ++mfi) {
             const Box& vbx = mfi.validbox();
             if (khi >= vbx.smallEnd(0) && khi <= vbx.bigEnd(0)) {
@@ -387,7 +402,7 @@ void LabFrameDriftKineticES::ComputeSpaceChargeField (
     setPhiBC(phi_fp, warpx.gett_new(0));
 
     // perform phi calculation
-    computePhi(rho_fp, phi_fp, Efield_fp);
+    computePhi(rhs, phi_fp, Efield_fp);
 
     // Compute the electric field. Note that if an EB is used the electric
     // field will be calculated in the computePhi call.

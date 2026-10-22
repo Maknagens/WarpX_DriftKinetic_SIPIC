@@ -239,6 +239,13 @@ computeEffectivePotentialPhi (
             mlmg.setFinalFillBC(true);
         }
 
+        // A node on the boundary between two boxes is in the valid region of
+        // both, and the deposition plus guard-cell sum does not leave the two
+        // copies identical. MLNodeLaplacian needs a single-valued right-hand
+        // side, so synchronize it here -- the same call PoissonSolver.H makes
+        // before its own solve.
+        rho[lev]->OverrideSync(geom[lev].periodicity());
+
         // Solve Poisson equation at lev
         mlmg.solve( {phi[lev]}, {rho[lev]},
                     relative_tolerance, absolute_tolerance );
